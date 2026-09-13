@@ -16,6 +16,13 @@ const PORT = process.env.PORT || 3000;
 // resolve token symbol/supply. Set this in Render's Environment tab.
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "";
 
+// Optional: set these to get a Telegram push notification on every trade,
+// so you're alerted even when your computer is off/asleep. Both must be
+// set for alerts to fire; if either is missing, alerts are silently
+// skipped (everything else keeps working normally).
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
+
 // Optional shared secret between Helius and this server (set the same value
 // as the Helius webhook's "Authorization Header" field if you use one).
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "";
@@ -121,6 +128,52 @@ async function refreshBnbPrice() {
 }
 refreshBnbPrice();
 setInterval(refreshBnbPrice, 5 * 60 * 1000);
+
+// ---------- Telegram push alerts ----------
+// Fires on every stored trade event, same content as what shows in the
+// Feed tab. No-ops silently if the env vars aren't set.
+function formatPrice(n) {
+  if (n == null) return "N/A";
+  if (n === 0) return "$0";
+  const abs = Math.abs(n);
+  const decimals = abs >= 1 ? 2 : abs >= 0.01 ? 4 : abs >= 0.0001 ? 6 : 9;
+  return "$" + n.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+async function sendTelegramAlert(ev) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+
+  const who = ev.walletLabel || ev.walletAddress;
+  let text;
+
+  if (ev.type === "SWAP" && ev.mint !== undefined) {
+    const emoji = ev.direction === "BUY" ? "\u{1F7E2}" : "\u{1F534}";
+    const ticker = ev.symbol ? `$${ev.symbol}` : "unknown token";
+    const spentLabel = ev.direction === "SELL" ? "Received" : "Spent";
+    const spent =
+      ev.quoteValueUsd != null
+        ? `$${ev.quoteValueUsd.toFixed(2)}${ev.quoteSymbol ? ` (${ev.quoteAmount != null ? ev.quoteAmount.toFixed(4) : ""} ${ev.quoteSymbol})` : ""}`
+        : "N/A";
+    text =
+      `${emoji} ${ev.direction} ${ticker}\n` +
+      `${who}${ev.chain ? ` \u2022 ${ev.chain}` : ""}\n` +
+      `Amount: ${ev.tokenAmount}\n` +
+      `${spentLabel}: ${spent}\n` +
+      `Price: ${formatPrice(ev.priceUsd)}`;
+  } else {
+    text = `\u{1F4E9} ${ev.type}\n${who}${ev.chain ? ` \u2022 ${ev.chain}` : ""}\n${ev.description || ""}`;
+  }
+
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
+    });
+  } catch (e) {
+    console.warn("[warn] failed to send Telegram alert:", e.message);
+  }
+}
 
 // ---------- token metadata (symbol, name), cached forever per mint ----------
 // Reads directly from Solana on-chain data via a free public RPC node - costs
@@ -514,6 +567,7 @@ app.post("/webhook", (req, res) => {
       events = [...events, ...filtered];
       if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
       saveJson(ACTIVITY_FILE, events);
+      filtered.forEach(sendTelegramAlert);
       console.log(`[webhook] stored ${filtered.length} event(s) (${newEvents.length - filtered.length} skipped, no real trade)`);
     })
     .catch((e) => console.error("[error] processing webhook:", e));
@@ -689,6 +743,7 @@ function processEvmGroup(hash) {
   events = [...events, finalEvent];
   if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
   saveJson(ACTIVITY_FILE, events);
+  sendTelegramAlert(finalEvent);
   console.log(`[webhook/evm] stored event for tx ${hash} (chain=${chain})`);
 }
 
