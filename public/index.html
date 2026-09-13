@@ -129,7 +129,7 @@
     <h1>Wallet Dashboard</h1>
     <div style="display:flex; align-items:center; gap:16px;">
       <span id="status">Loading...</span>
-      <button id="enable-btn">Enable Notifications</button>
+      <button id="enable-btn">Enable Sound</button>
     </div>
   </div>
   <div class="tabs">
@@ -427,17 +427,13 @@
 
   function notify(ev) {
     playBeep();
-    if (Notification.permission !== "granted") return;
-    const ticker = ev.symbol ? `$${ev.symbol}` : ev.type;
-    const who = ev.walletLabel || shortAddr(ev.walletAddress);
-    new Notification("Wallet activity", { body: `${who}: ${ev.direction || ev.type} ${ticker}` });
   }
 
   // ---------- sound alert (synthesized, no audio file needed) ----------
   // Browsers block audio until a user has interacted with the page at least
-  // once. We unlock the audio context on the "Enable Notifications" click
-  // (a real user gesture), so later beeps triggered by the background
-  // polling timer are allowed to play.
+  // once. We unlock the audio context on the "Enable Sound" click (a real
+  // user gesture), so later beeps triggered by the background polling
+  // timer are allowed to play.
   let audioCtx = null;
   function unlockAudio() {
     if (!audioCtx) {
@@ -448,17 +444,18 @@
     }
   }
   function playBeep() {
-    if (!audioCtx) return; // not unlocked yet - user hasn't clicked "Enable Notifications"
+    if (!audioCtx) return; // not unlocked yet - user hasn't clicked "Enable Sound"
+    const duration = 1.2; // seconds
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.type = "sine";
     osc.frequency.value = 880;
     gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.18);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
     osc.connect(gain);
     gain.connect(audioCtx.destination);
     osc.start();
-    osc.stop(audioCtx.currentTime + 0.18);
+    osc.stop(audioCtx.currentTime + duration);
   }
 
   async function poll() {
@@ -482,10 +479,9 @@
     }
   }
 
-  enableBtn.addEventListener("click", async () => {
+  enableBtn.addEventListener("click", () => {
     unlockAudio();
-    const perm = await Notification.requestPermission();
-    enableBtn.textContent = perm === "granted" ? "Notifications on" : "Notifications blocked";
+    enableBtn.textContent = "Sound on";
   });
 
   loadWallets();
