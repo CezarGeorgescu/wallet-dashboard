@@ -124,39 +124,114 @@ app.delete("/api/wallets/:address", (req, res) => {
 });
 
 // ---------- parsing a Helius enhanced SWAP transaction ----------
+// A swap always has two "legs": what was given up, and what was received.
+// One of those legs is usually a well-known "quote" currency (SOL, USDC,
+// USDT) and the other is the actual coin of interest. We treat SOL/USDC/USDT
+// as known quotes with a reliable USD value, and whichever leg ISN'T one of
+// those is the coin we feature (ticker, contract address, market cap).
+//
 // Note: Helius's exact JSON shape can vary slightly by DEX/source. This is
-// defensive with fallbacks, but may need a small tweak once we see a real
-// live payload from your wallets.
+// defensive with fallbacks, but may still need small tweaks as new edge
+// cases show up.
+
+const WSOL_MINT = "So11111111111111111111111111111111111111112";
+const KNOWN_QUOTES = {
+  [WSOL_MINT]: { symbol: "SOL", isStable: false },
+  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: { symbol: "USDC", isStable: true },
+  Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: { symbol: "USDT", isStable: true },
+};
+
+function buildLeg(mint, amount, isNative) {
+  if (isNative) {
+    // Native SOL leg: amount is in lamports.
+    return { mint: WSOL_MINT, amount: Number(amount) / LAMPORTS_PER_SOL };
+  }
+  return { mint, amount: Number(amount) };
+}
+
+// Collect every input/output leg from the enhanced swap event into a flat
+// list, tagging native SOL movements as the wrapped-SOL mint so they're
+// comparable to token legs.
+function collectLegs(swap) {
+  const inputs = [];
+  const outputs = [];
+
+  if (swap.nativeInput) inputs.push(buildLeg(null, swap.nativeInput.amount, true));
+  if (swap.nativeOutput) outputs.push(buildLeg(null, swap.nativeOutput.amount, true));
+  (swap.tokenInputs || []).forEach((t) => inputs.push(buildLeg(t.mint, t.tokenAmount, false)));
+  (swap.tokenOutputs || []).forEach((t) => outputs.push(buildLeg(t.mint, t.tokenAmount, false)));
+
+  return { inputs, outputs };
+}
+
+// Among multiple legs on one side (e.g. a main swap amount plus a tiny
+// referral-fee transfer), assume the largest amount is the real trade leg.
+function biggestLeg(legs) {
+  if (!legs || legs.length === 0) return null;
+  return legs.reduce((a, b) => (b.amount > a.amount ? b : a));
+}
+
 function extractSwapLegs(tx) {
   const swap = tx.events && tx.events.swap;
+  let inputs, outputs;
+
   if (swap) {
-    const solLeg = swap.nativeInput || swap.nativeOutput;
-    const tokenLeg =
-      (swap.tokenOutputs && swap.tokenOutputs[0]) ||
-      (swap.tokenInputs && swap.tokenInputs[0]);
-    if (solLeg && tokenLeg) {
-      const direction = swap.nativeInput ? "BUY" : "SELL";
-      const solAmount = Number(solLeg.amount) / LAMPORTS_PER_SOL;
-      const tokenAmount = Number(tokenLeg.tokenAmount);
-      const mint = tokenLeg.mint;
-      return { direction, solAmount, tokenAmount, mint };
-    }
+    ({ inputs, outputs } = collectLegs(swap));
+  } else {
+    // Fallback: build pseudo-legs from raw transfer arrays if there's no
+    // parsed swap event at all.
+    inputs = [];
+    outputs = [];
+    (tx.tokenTransfers || []).forEach((t) => {
+      const leg = { mint: t.mint, amount: Math.abs(t.tokenAmount) };
+      if (t.tokenAmount < 0) inputs.push(leg);
+      else outputs.push(leg);
+    });
+    (tx.nativeTransfers || []).forEach((t) => {
+      const leg = buildLeg(null, Math.abs(t.amount), true);
+      if (t.amount < 0) inputs.push(leg);
+      else outputs.push(leg);
+    });
   }
 
-  // Fallback: scan raw transfer arrays directly.
-  const tokenTransfer = (tx.tokenTransfers || [])[0];
-  const nativeTransfer = (tx.nativeTransfers || [])[0];
-  if (tokenTransfer && nativeTransfer) {
-    const direction = nativeTransfer.amount < 0 ? "SELL" : "BUY";
-    return {
-      direction,
-      solAmount: Math.abs(nativeTransfer.amount) / LAMPORTS_PER_SOL,
-      tokenAmount: Math.abs(tokenTransfer.tokenAmount),
-      mint: tokenTransfer.mint,
-    };
+  const inLeg = biggestLeg(inputs);
+  const outLeg = biggestLeg(outputs);
+  if (!inLeg || !outLeg) return null;
+
+  const inIsQuote = KNOWN_QUOTES[inLeg.mint];
+  const outIsQuote = KNOWN_QUOTES[outLeg.mint];
+
+  // Figure out which leg is "the coin" (not a known quote currency) and
+  // which is "the quote" (SOL/USDC/USDT) used to price it.
+  let coinLeg, quoteLeg, direction;
+  if (outIsQuote && !inIsQuote) {
+    // Gave away a coin, received a known quote currency -> SELL
+    coinLeg = inLeg;
+    quoteLeg = outLeg;
+    direction = "SELL";
+  } else if (inIsQuote && !outIsQuote) {
+    // Gave away a known quote currency, received a coin -> BUY
+    coinLeg = outLeg;
+    quoteLeg = inLeg;
+    direction = "BUY";
+  } else {
+    // Both or neither leg is a known quote (e.g. SOL/USDC arbitrage, or two
+    // unrecognized tokens). Fall back to treating the output as "the coin".
+    coinLeg = outLeg;
+    quoteLeg = inLeg;
+    direction = "BUY";
   }
 
-  return null;
+  const quoteInfo = KNOWN_QUOTES[quoteLeg.mint] || { symbol: null, isStable: false };
+
+  return {
+    direction,
+    mint: coinLeg.mint,
+    tokenAmount: coinLeg.amount,
+    quoteAmount: quoteLeg.amount,
+    quoteSymbol: quoteInfo.symbol,
+    quoteIsStable: quoteInfo.isStable,
+  };
 }
 
 async function buildEvent(tx) {
@@ -181,8 +256,18 @@ async function buildEvent(tx) {
   if (!legs) return base;
 
   const meta = await getTokenMeta(legs.mint);
-  const priceInSol = legs.tokenAmount > 0 ? legs.solAmount / legs.tokenAmount : null;
-  const priceUsd = priceInSol != null && solUsdPrice ? priceInSol * solUsdPrice : null;
+
+  // A stablecoin quote (USDC/USDT) is worth ~$1, no extra lookup needed.
+  // A SOL quote needs the live SOL/USD price.
+  let quoteValueUsd = null;
+  if (legs.quoteIsStable) {
+    quoteValueUsd = legs.quoteAmount;
+  } else if (legs.quoteSymbol === "SOL" && solUsdPrice) {
+    quoteValueUsd = legs.quoteAmount * solUsdPrice;
+  }
+
+  const priceUsd =
+    quoteValueUsd != null && legs.tokenAmount > 0 ? quoteValueUsd / legs.tokenAmount : null;
   const marketCapUsd = priceUsd != null && meta && meta.supply ? priceUsd * meta.supply : null;
 
   return {
@@ -191,7 +276,9 @@ async function buildEvent(tx) {
     mint: legs.mint,
     symbol: (meta && meta.symbol) || null,
     tokenAmount: legs.tokenAmount,
-    solAmount: legs.solAmount,
+    quoteAmount: legs.quoteAmount,
+    quoteSymbol: legs.quoteSymbol,
+    quoteValueUsd,
     priceUsd,
     marketCapUsd,
   };
@@ -204,6 +291,11 @@ app.post("/webhook", (req, res) => {
     if (auth !== WEBHOOK_SECRET) return res.status(403).send("forbidden");
   }
   res.status(200).send("ok"); // must ack within 1s; process the rest async
+
+  // TEMPORARY: log the raw payload so we can see Helius's exact field names
+  // and fix parsing based on real data instead of guessing. Remove this
+  // once parsing is confirmed correct.
+  console.log("[debug] raw webhook payload:", JSON.stringify(req.body, null, 2));
 
   const body = Array.isArray(req.body) ? req.body : [req.body];
   Promise.all(body.map(buildEvent))
