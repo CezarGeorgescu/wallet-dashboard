@@ -105,6 +105,23 @@ async function refreshEthPrice() {
 refreshEthPrice();
 setInterval(refreshEthPrice, 5 * 60 * 1000);
 
+let bnbUsdPrice = null;
+async function refreshBnbPrice() {
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd"
+    );
+    const data = await res.json();
+    if (data && data.binancecoin && data.binancecoin.usd) {
+      bnbUsdPrice = data.binancecoin.usd;
+    }
+  } catch (e) {
+    console.warn("[warn] failed to refresh BNB price:", e.message);
+  }
+}
+refreshBnbPrice();
+setInterval(refreshBnbPrice, 5 * 60 * 1000);
+
 // ---------- token metadata (symbol, name), cached forever per mint ----------
 // Reads directly from Solana on-chain data via a free public RPC node - costs
 // ZERO Helius credits, no matter how many new tokens appear.
@@ -521,8 +538,9 @@ app.get("/api/activity", (req, res) => {
 
 const NETWORK_TO_CHAIN = {
   ROBINHOOD_MAINNET: "robinhood",
-  ETH_MAINNET: "ethereum", // not yet verified against real data - confirm when Ethereum is added
-  BASE_MAINNET: "base", // not yet verified against real data - confirm when Base is added
+  ETH_MAINNET: "ethereum", // confirmed correct against real data
+  BASE_MAINNET: "base", // confirmed correct against real data
+  BNB_MAINNET: "bsc", // not yet verified against real data - confirm when BSC is added
 };
 
 const NATIVE_ETH = "NATIVE_ETH"; // sentinel id for the chain's native gas token
@@ -568,7 +586,13 @@ function computeEvmNetFlows(activities, watchedAddressLower) {
   return { net, assetMeta };
 }
 
-function extractEvmSwapLegs(activities, watchedAddressLower) {
+// Which CoinGecko-tracked USD price applies to a chain's native gas token.
+// Ethereum, Base, and Robinhood Chain all use ETH; BSC uses BNB.
+function nativePriceUsdFor(chain) {
+  return chain === "bsc" ? bnbUsdPrice : ethUsdPrice;
+}
+
+function extractEvmSwapLegs(activities, watchedAddressLower, chain) {
   const { net, assetMeta } = computeEvmNetFlows(activities, watchedAddressLower);
 
   let coinId = null;
@@ -584,16 +608,17 @@ function extractEvmSwapLegs(activities, watchedAddressLower) {
   }
   if (!coinId) return null; // no real coin movement for our wallet - e.g. pure fee/passthrough
 
+  const nativePriceUsd = nativePriceUsdFor(chain);
   let quoteValueUsd = 0;
   let quoteSymbol = null;
   let quoteAmount = null;
   let dominantAbs = 0;
   for (const [id, amount] of Object.entries(quoteNet)) {
-    const usdValue = id === NATIVE_ETH && ethUsdPrice ? amount * ethUsdPrice : null;
+    const usdValue = id === NATIVE_ETH && nativePriceUsd ? amount * nativePriceUsd : null;
     if (usdValue != null) quoteValueUsd += usdValue;
     if (Math.abs(amount) > dominantAbs) {
       dominantAbs = Math.abs(amount);
-      quoteSymbol = (assetMeta[id] && assetMeta[id].symbol) || "ETH";
+      quoteSymbol = (assetMeta[id] && assetMeta[id].symbol) || (chain === "bsc" ? "BNB" : "ETH");
       quoteAmount = Math.abs(amount);
     }
   }
