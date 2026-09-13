@@ -88,6 +88,23 @@ async function refreshSolPrice() {
 refreshSolPrice();
 setInterval(refreshSolPrice, 5 * 60 * 1000);
 
+let ethUsdPrice = null;
+async function refreshEthPrice() {
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
+    );
+    const data = await res.json();
+    if (data && data.ethereum && data.ethereum.usd) {
+      ethUsdPrice = data.ethereum.usd;
+    }
+  } catch (e) {
+    console.warn("[warn] failed to refresh ETH price:", e.message);
+  }
+}
+refreshEthPrice();
+setInterval(refreshEthPrice, 5 * 60 * 1000);
+
 // ---------- token metadata (symbol, name), cached forever per mint ----------
 // Reads directly from Solana on-chain data via a free public RPC node - costs
 // ZERO Helius credits, no matter how many new tokens appear.
@@ -430,6 +447,7 @@ async function buildEvent(tx) {
     timestamp,
     walletAddress,
     walletLabel,
+    chain: "solana",
     type: tx.type || "UNKNOWN",
     description: tx.description || "",
   };
@@ -491,19 +509,177 @@ app.get("/api/activity", (req, res) => {
 
 // ---------- EVM webhook endpoint (Alchemy) ----------
 // One endpoint handles all EVM chains - Alchemy's "Address Activity"
-// webhook payload includes which network it came from, so we don't need a
-// separate URL per chain.
+// webhook payload includes which network it came from.
 //
-// TEMPORARY: just logging the raw payload for now. We haven't seen a real
-// one yet, so - same approach that worked for the Solana side - we build
-// the actual parsing logic from real captured data, not guesses.
+// Important, confirmed on real captured data: Alchemy sends ONE webhook
+// call per activity item, NOT one bundled call per transaction like Helius
+// did for Solana. A single swap shows up as multiple separate deliveries
+// (e.g. "0.0001 ETH out" and "0.966 TOKEN in" arrived as two different
+// webhook calls, ~1 second apart, sharing the same transaction hash). We
+// buffer activity items by hash for a few seconds so they can be
+// recombined into one real trade before we compute anything.
+
+const NETWORK_TO_CHAIN = {
+  ROBINHOOD_MAINNET: "robinhood",
+  ETH_MAINNET: "ethereum", // not yet verified against real data - confirm when Ethereum is added
+  BASE_MAINNET: "base", // not yet verified against real data - confirm when Base is added
+};
+
+const NATIVE_ETH = "NATIVE_ETH"; // sentinel id for the chain's native gas token
+// Known "quote" assets, same concept as SOL/USDC on the Solana side. Only
+// native ETH for now - add stablecoin contract addresses here as we
+// encounter USDC/USDT/USDG-quoted swaps on these chains.
+const EVM_QUOTE_IDS = new Set([NATIVE_ETH]);
+
+function findWatchedEvmAddress(activities, chain) {
+  const knownMap = {}; // lowercase address -> original-cased address (for label lookup)
+  for (const [addr, info] of Object.entries(wallets)) {
+    if (info.chain === chain) knownMap[addr.toLowerCase()] = addr;
+  }
+  for (const act of activities) {
+    const from = act.fromAddress && act.fromAddress.toLowerCase();
+    const to = act.toAddress && act.toAddress.toLowerCase();
+    if (from && knownMap[from]) return knownMap[from];
+    if (to && knownMap[to]) return knownMap[to];
+  }
+  return null;
+}
+
+// Net change per asset for our wallet, across every activity item that
+// shares one transaction hash. Native ETH and each ERC-20 contract are
+// tracked as separate "assets", identified by contract address (or the
+// NATIVE_ETH sentinel).
+function computeEvmNetFlows(activities, watchedAddressLower) {
+  const net = {};
+  const assetMeta = {}; // assetId -> { symbol }
+  for (const act of activities) {
+    const isToken = act.category === "token" && act.rawContract && act.rawContract.address;
+    const assetId = isToken ? act.rawContract.address.toLowerCase() : NATIVE_ETH;
+    assetMeta[assetId] = { symbol: act.asset || null };
+
+    const amount = act.value || 0;
+    const from = act.fromAddress && act.fromAddress.toLowerCase();
+    const to = act.toAddress && act.toAddress.toLowerCase();
+    if (to === watchedAddressLower) net[assetId] = (net[assetId] || 0) + amount;
+    if (from === watchedAddressLower) net[assetId] = (net[assetId] || 0) - amount;
+  }
+  return { net, assetMeta };
+}
+
+function extractEvmSwapLegs(activities, watchedAddressLower) {
+  const { net, assetMeta } = computeEvmNetFlows(activities, watchedAddressLower);
+
+  let coinId = null;
+  let coinAmount = 0;
+  const quoteNet = {};
+  for (const [id, amount] of Object.entries(net)) {
+    if (Math.abs(amount) < 1e-12) continue; // dust/rounding noise
+    if (EVM_QUOTE_IDS.has(id)) quoteNet[id] = amount;
+    else if (Math.abs(amount) > Math.abs(coinAmount)) {
+      coinId = id;
+      coinAmount = amount;
+    }
+  }
+  if (!coinId) return null; // no real coin movement for our wallet - e.g. pure fee/passthrough
+
+  let quoteValueUsd = 0;
+  let quoteSymbol = null;
+  let quoteAmount = null;
+  let dominantAbs = 0;
+  for (const [id, amount] of Object.entries(quoteNet)) {
+    const usdValue = id === NATIVE_ETH && ethUsdPrice ? amount * ethUsdPrice : null;
+    if (usdValue != null) quoteValueUsd += usdValue;
+    if (Math.abs(amount) > dominantAbs) {
+      dominantAbs = Math.abs(amount);
+      quoteSymbol = (assetMeta[id] && assetMeta[id].symbol) || "ETH";
+      quoteAmount = Math.abs(amount);
+    }
+  }
+
+  return {
+    direction: coinAmount > 0 ? "BUY" : "SELL",
+    mint: coinId === NATIVE_ETH ? null : coinId, // contract address, lowercase
+    symbol: (assetMeta[coinId] && assetMeta[coinId].symbol) || null,
+    tokenAmount: Math.abs(coinAmount),
+    quoteValueUsd: Math.abs(quoteValueUsd) || null,
+    quoteSymbol,
+    quoteAmount,
+  };
+}
+
+const pendingEvmTx = {}; // hash -> { activities: [], chain, timer }
+const EVM_GROUP_DELAY_MS = 3000; // wait this long after the last related delivery before processing
+
+function scheduleEvmProcessing(hash) {
+  const entry = pendingEvmTx[hash];
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => processEvmGroup(hash), EVM_GROUP_DELAY_MS);
+}
+
+function processEvmGroup(hash) {
+  const entry = pendingEvmTx[hash];
+  delete pendingEvmTx[hash];
+  if (!entry) return;
+
+  const { activities, chain } = entry;
+  const watchedAddress = findWatchedEvmAddress(activities, chain);
+  if (!watchedAddress) return; // shouldn't normally happen - Alchemy only sends activity for watched addresses
+
+  const walletLabel = (wallets[watchedAddress] && wallets[watchedAddress].label) || null;
+  const first = activities[0] || {};
+  const timestamp = first.blockTimestamp ? parseInt(first.blockTimestamp, 16) * 1000 : Date.now();
+
+  const legs = extractEvmSwapLegs(activities, watchedAddress.toLowerCase());
+  if (!legs) return; // no real trade for our wallet in this tx - skip silently, same as the Solana OKX-router case
+
+  const priceUsd =
+    legs.quoteValueUsd != null && legs.tokenAmount > 0 ? legs.quoteValueUsd / legs.tokenAmount : null;
+
+  const finalEvent = {
+    id: hash,
+    timestamp,
+    walletAddress: watchedAddress,
+    walletLabel,
+    chain,
+    type: "SWAP",
+    description: "",
+    direction: legs.direction,
+    mint: legs.mint,
+    symbol: legs.symbol,
+    tokenAmount: legs.tokenAmount,
+    quoteAmount: legs.quoteAmount,
+    quoteSymbol: legs.quoteSymbol,
+    quoteValueUsd: legs.quoteValueUsd,
+    priceUsd,
+  };
+
+  events = [...events, finalEvent];
+  if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
+  saveJson(ACTIVITY_FILE, events);
+  console.log(`[webhook/evm] stored event for tx ${hash} (chain=${chain})`);
+}
+
 app.post("/webhook/evm", (req, res) => {
   if (WEBHOOK_SECRET) {
     const auth = req.headers["authorization"] || "";
     if (auth !== WEBHOOK_SECRET) return res.status(403).send("forbidden");
   }
   res.status(200).send("ok");
-  console.log("[debug] raw EVM webhook payload:", JSON.stringify(req.body));
+
+  try {
+    const network = req.body.event && req.body.event.network;
+    const chain = NETWORK_TO_CHAIN[network] || network;
+    const activities = (req.body.event && req.body.event.activity) || [];
+    for (const act of activities) {
+      const hash = act.hash;
+      if (!hash) continue;
+      if (!pendingEvmTx[hash]) pendingEvmTx[hash] = { activities: [], chain };
+      pendingEvmTx[hash].activities.push(act);
+      scheduleEvmProcessing(hash);
+    }
+  } catch (e) {
+    console.error("[error] processing EVM webhook:", e);
+  }
 });
 
 app.get("/health", (req, res) => res.send("ok"));
