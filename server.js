@@ -53,8 +53,21 @@ function saveJson(file, data) {
 }
 
 let events = loadJson(ACTIVITY_FILE, []);
-let wallets = loadJson(WALLETS_FILE, {}); // { address: label }
 let tokenCache = loadJson(TOKEN_CACHE_FILE, {}); // { mint: {symbol,name,decimals,supply,fetchedAt} }
+
+// wallets.json used to be { address: "label" } (Solana-only). Now that we
+// support multiple chains, each entry needs a chain tag too. Old entries
+// are migrated in-memory on load (assumed Solana, since that's all that
+// existed before); the file itself gets rewritten in the new shape the
+// next time anything saves.
+function migrateWallets(raw) {
+  const migrated = {};
+  for (const [addr, val] of Object.entries(raw)) {
+    migrated[addr] = typeof val === "string" ? { label: val, chain: "solana" } : val;
+  }
+  return migrated;
+}
+let wallets = migrateWallets(loadJson(WALLETS_FILE, {})); // { address: {label, chain} }
 
 // ---------- SOL/USD price, refreshed every few minutes ----------
 let solUsdPrice = null;
@@ -195,9 +208,9 @@ async function getTokenMeta(mint) {
 app.get("/api/wallets", (req, res) => res.json(wallets));
 
 app.post("/api/wallets", (req, res) => {
-  const { address, label } = req.body || {};
+  const { address, label, chain } = req.body || {};
   if (!address || !label) return res.status(400).json({ error: "address and label required" });
-  wallets[address] = label;
+  wallets[address] = { label, chain: chain || "solana" };
   saveJson(WALLETS_FILE, wallets);
   res.json({ ok: true });
 });
@@ -315,7 +328,11 @@ const DUST_EPSILON = 1e-6; // ignore net amounts smaller than this (rounding noi
 // since Helius's feePayer can be a fee-relayer/cosigner instead of the
 // actual trader (confirmed: apps like Fomo cosign transactions).
 function findWatchedAddress(tx) {
-  const known = Object.keys(wallets);
+  // Only consider wallets tagged for Solana - now that wallets.json can
+  // hold EVM addresses too, mixing them in here would let an EVM address
+  // accidentally "match" (extremely unlikely in practice since formats
+  // differ completely, but filtering explicitly is the correct approach).
+  const known = Object.keys(wallets).filter((addr) => wallets[addr].chain === "solana");
   if (known.length === 0) return tx.feePayer || null;
 
   const candidates = new Set();
@@ -406,7 +423,7 @@ async function buildEvent(tx) {
   const timestamp = tx.timestamp ? tx.timestamp * 1000 : Date.now();
   const watchedAddress = findWatchedAddress(tx);
   const walletAddress = watchedAddress || tx.feePayer || "unknown";
-  const walletLabel = wallets[walletAddress] || null;
+  const walletLabel = (wallets[walletAddress] && wallets[walletAddress].label) || null;
 
   const base = {
     id: signature,
@@ -470,6 +487,23 @@ app.post("/webhook", (req, res) => {
 app.get("/api/activity", (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 100;
   res.json(events.slice(-limit).reverse());
+});
+
+// ---------- EVM webhook endpoint (Alchemy) ----------
+// One endpoint handles all EVM chains - Alchemy's "Address Activity"
+// webhook payload includes which network it came from, so we don't need a
+// separate URL per chain.
+//
+// TEMPORARY: just logging the raw payload for now. We haven't seen a real
+// one yet, so - same approach that worked for the Solana side - we build
+// the actual parsing logic from real captured data, not guesses.
+app.post("/webhook/evm", (req, res) => {
+  if (WEBHOOK_SECRET) {
+    const auth = req.headers["authorization"] || "";
+    if (auth !== WEBHOOK_SECRET) return res.status(403).send("forbidden");
+  }
+  res.status(200).send("ok");
+  console.log("[debug] raw EVM webhook payload:", JSON.stringify(req.body));
 });
 
 app.get("/health", (req, res) => res.send("ok"));
