@@ -75,38 +75,73 @@ async function refreshSolPrice() {
 refreshSolPrice();
 setInterval(refreshSolPrice, 5 * 60 * 1000);
 
-// ---------- token metadata (symbol, name, decimals, supply), cached forever per mint ----------
+// ---------- token metadata (symbol, name), cached forever per mint ----------
+// Reads directly from Solana's on-chain Metaplex Token Metadata program,
+// via a free public RPC node - costs ZERO Helius credits, no matter how
+// many new tokens appear. The account layout (name/symbol as length-prefixed
+// strings right after a fixed header) has been stable since the program's
+// original launch and hasn't broken backward compatibility.
+//
+// We no longer fetch "supply" here since we dropped market cap - price is
+// computed for free from the swap itself (spent/received divided by token
+// amount), so there was no other reason left to call a paid endpoint.
+const { PublicKey } = require("@solana/web3.js");
+const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
+const PUBLIC_SOLANA_RPC = "https://api.mainnet-beta.solana.com";
+
+function parseMetaplexNameSymbol(buffer) {
+  // Layout: key(1) + updateAuthority(32) + mint(32) = 65 byte header, then
+  // Borsh strings: u32 LE length prefix + UTF8 bytes, for name then symbol.
+  let offset = 65;
+  const nameLen = buffer.readUInt32LE(offset);
+  offset += 4;
+  const name = buffer.slice(offset, offset + nameLen).toString("utf8").replace(/\0/g, "").trim();
+  offset += nameLen;
+
+  const symbolLen = buffer.readUInt32LE(offset);
+  offset += 4;
+  const symbol = buffer.slice(offset, offset + symbolLen).toString("utf8").replace(/\0/g, "").trim();
+
+  return { name, symbol };
+}
+
 async function getTokenMeta(mint) {
   if (!mint) return null;
   if (tokenCache[mint]) return tokenCache[mint];
-  if (!HELIUS_API_KEY) return null;
 
   try {
-    const res = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+    const mintPubkey = new PublicKey(mint);
+    const [metadataPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintPubkey.toBuffer()],
+      TOKEN_METADATA_PROGRAM_ID
+    );
+
+    const res = await fetch(PUBLIC_SOLANA_RPC, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: "token-meta",
-        method: "getAsset",
-        params: { id: mint, displayOptions: { showFungible: true } },
+        method: "getAccountInfo",
+        params: [metadataPda.toBase58(), { encoding: "base64" }],
       }),
     });
     const json = await res.json();
-    const result = json.result;
-    if (!result) return null;
+    const accountInfo = json.result && json.result.value;
+    if (!accountInfo) {
+      // No on-chain metadata found for this mint (rare, but possible for
+      // very obscure/custom tokens). Cache a "no symbol" result so we don't
+      // keep retrying it on every swap.
+      const meta = { symbol: null, name: null, fetchedAt: Date.now() };
+      tokenCache[mint] = meta;
+      saveJson(TOKEN_CACHE_FILE, tokenCache);
+      return meta;
+    }
 
-    const symbol =
-      (result.token_info && result.token_info.symbol) ||
-      (result.content && result.content.metadata && result.content.metadata.symbol) ||
-      null;
-    const name =
-      (result.content && result.content.metadata && result.content.metadata.name) || null;
-    const decimals = result.token_info ? result.token_info.decimals : 0;
-    const supplyRaw = result.token_info ? result.token_info.supply : null;
-    const supply = supplyRaw != null ? supplyRaw / Math.pow(10, decimals) : null;
+    const buffer = Buffer.from(accountInfo.data[0], "base64");
+    const { name, symbol } = parseMetaplexNameSymbol(buffer);
 
-    const meta = { symbol, name, decimals, supply, fetchedAt: Date.now() };
+    const meta = { symbol: symbol || null, name: name || null, fetchedAt: Date.now() };
     tokenCache[mint] = meta;
     saveJson(TOKEN_CACHE_FILE, tokenCache);
     return meta;
@@ -133,33 +168,6 @@ app.delete("/api/wallets/:address", (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- fresh (uncached) live price lookup, for unrealized PNL ----------
-// Unlike getTokenMeta (cached forever - symbol/supply rarely change), price
-// changes constantly, so this always hits Helius fresh. Only called for
-// tokens a wallet currently holds, and only when the Wallets tab is opened -
-// not on every swap - so the extra cost stays small.
-async function getLivePriceUsd(mint) {
-  if (!HELIUS_API_KEY) return null;
-  try {
-    const res = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "live-price",
-        method: "getAsset",
-        params: { id: mint, displayOptions: { showFungible: true } },
-      }),
-    });
-    const json = await res.json();
-    const priceInfo = json.result && json.result.token_info && json.result.token_info.price_info;
-    return priceInfo ? priceInfo.price_per_token : null;
-  } catch (e) {
-    console.warn(`[warn] failed to fetch live price for ${mint}:`, e.message);
-    return null;
-  }
-}
-
 // ---------- per-wallet, per-token PNL ----------
 // Uses the "average cost" accounting method: every buy adds to a running
 // average cost basis; every sell realizes profit/loss against that average
@@ -178,9 +186,9 @@ function computeWalletStats(address) {
         mint: ev.mint,
         symbol: ev.symbol,
         buyAmountUsd: 0,
-        buyMcapWeighted: 0,
+        buyPriceWeighted: 0,
         sellAmountUsd: 0,
-        sellMcapWeighted: 0,
+        sellPriceWeighted: 0,
         realizedPnl: 0,
         tokensHeld: 0,
         costBasisUsd: 0,
@@ -192,13 +200,13 @@ function computeWalletStats(address) {
     if (ev.direction === "BUY") {
       const usd = ev.quoteValueUsd || 0;
       t.buyAmountUsd += usd;
-      if (ev.marketCapUsd != null && usd) t.buyMcapWeighted += ev.marketCapUsd * usd;
+      if (ev.priceUsd != null && usd) t.buyPriceWeighted += ev.priceUsd * usd;
       t.tokensHeld += ev.tokenAmount || 0;
       t.costBasisUsd += usd;
     } else if (ev.direction === "SELL") {
       const sellUsd = ev.quoteValueUsd || 0;
       t.sellAmountUsd += sellUsd;
-      if (ev.marketCapUsd != null && sellUsd) t.sellMcapWeighted += ev.marketCapUsd * sellUsd;
+      if (ev.priceUsd != null && sellUsd) t.sellPriceWeighted += ev.priceUsd * sellUsd;
 
       const avgCostPerToken = t.tokensHeld > 0 ? t.costBasisUsd / t.tokensHeld : 0;
       // Guard against apparently selling more than we ever saw bought (e.g.
@@ -216,46 +224,19 @@ function computeWalletStats(address) {
     mint: t.mint,
     symbol: t.symbol,
     buyAmountUsd: t.buyAmountUsd,
-    avgBoughtMcap: t.buyAmountUsd > 0 ? t.buyMcapWeighted / t.buyAmountUsd : null,
+    avgBoughtPrice: t.buyAmountUsd > 0 ? t.buyPriceWeighted / t.buyAmountUsd : null,
     sellAmountUsd: t.sellAmountUsd,
-    avgSoldMcap: t.sellAmountUsd > 0 ? t.sellMcapWeighted / t.sellAmountUsd : 0,
+    avgSoldPrice: t.sellAmountUsd > 0 ? t.sellPriceWeighted / t.sellAmountUsd : 0,
     realizedPnl: t.realizedPnl,
     remainingTokens: t.tokensHeld,
     remainingCostBasisUsd: t.costBasisUsd,
   }));
 }
 
-app.get("/api/wallet-stats/:address", async (req, res) => {
+app.get("/api/wallet-stats/:address", (req, res) => {
   const stats = computeWalletStats(req.params.address);
-
-  await Promise.all(
-    stats.map(async (s) => {
-      if (s.remainingTokens > 1e-6) {
-        const price = await getLivePriceUsd(s.mint);
-        if (price != null) {
-          s.currentPriceUsd = price;
-          s.currentValueUsd = price * s.remainingTokens;
-          s.unrealizedPnl = s.currentValueUsd - s.remainingCostBasisUsd;
-        } else {
-          s.currentPriceUsd = null;
-          s.currentValueUsd = null;
-          s.unrealizedPnl = null; // price unavailable (e.g. very new/illiquid token)
-        }
-      } else {
-        s.currentPriceUsd = null;
-        s.currentValueUsd = null;
-        s.unrealizedPnl = null; // nothing currently held
-      }
-    })
-  );
-
-  // Most interesting (biggest total PNL, positive or negative) first.
-  stats.sort((a, b) => {
-    const totalA = a.realizedPnl + (a.unrealizedPnl || 0);
-    const totalB = b.realizedPnl + (b.unrealizedPnl || 0);
-    return totalB - totalA;
-  });
-
+  // Most interesting (biggest realized PNL, positive or negative) first.
+  stats.sort((a, b) => b.realizedPnl - a.realizedPnl);
   res.json(stats);
 });
 
@@ -404,7 +385,6 @@ async function buildEvent(tx) {
   const meta = await getTokenMeta(legs.mint);
   const priceUsd =
     legs.quoteValueUsd != null && legs.tokenAmount > 0 ? legs.quoteValueUsd / legs.tokenAmount : null;
-  const marketCapUsd = priceUsd != null && meta && meta.supply ? priceUsd * meta.supply : null;
 
   return {
     ...base,
@@ -416,7 +396,6 @@ async function buildEvent(tx) {
     quoteSymbol: legs.quoteSymbol,
     quoteValueUsd: legs.quoteValueUsd,
     priceUsd,
-    marketCapUsd,
   };
 }
 
