@@ -420,7 +420,16 @@ async function buildEvent(tx) {
   if (tx.type !== "SWAP") return base;
 
   const legs = extractSwapLegs(tx);
-  if (!legs) return base;
+  if (!legs) {
+    // Log the full raw transaction ONLY when parsing fails to find a coin
+    // leg, so we can diagnose real gaps without flooding logs on every
+    // normal event. Safe to remove once no longer needed for debugging.
+    console.log(
+      `[debug] extractSwapLegs found nothing for signature=${tx.signature}, raw tx:`,
+      JSON.stringify(tx)
+    );
+    return base;
+  }
 
   const meta = await getTokenMeta(legs.mint);
   const priceUsd =
