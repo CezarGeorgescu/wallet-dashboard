@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Wallet Activity Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --border: #2a2e38;
+    --text: #e8e9ec;
+    --muted: #8b8f9b;
+    --accent: #6ee7b7;
+    --swap: #f0b429;
+    --transfer: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 24px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  #status { color: var(--muted); font-size: 13px; }
+  #enable-btn {
+    background: var(--accent);
+    border: none;
+    color: #0f1115;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  main { padding: 24px 32px; max-width: 900px; margin: 0 auto; }
+  .event {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .event .left { display: flex; flex-direction: column; gap: 4px; }
+  .wallet { font-family: monospace; font-size: 13px; color: var(--muted); }
+  .desc { font-size: 14px; }
+  .badge {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    text-transform: uppercase;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .badge.SWAP { background: rgba(240,180,41,0.15); color: var(--swap); }
+  .badge.TRANSFER { background: rgba(96,165,250,0.15); color: var(--transfer); }
+  .badge.UNKNOWN { background: rgba(139,143,155,0.15); color: var(--muted); }
+  .time { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #empty { color: var(--muted); text-align: center; margin-top: 60px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Wallet Activity</h1>
+  <div style="display:flex; align-items:center; gap:16px;">
+    <span id="status">Loading...</span>
+    <button id="enable-btn">Enable Notifications</button>
+  </div>
+</header>
+
+<main>
+  <div id="feed"></div>
+  <div id="empty" style="display:none;">No activity yet. Waiting for a watched wallet to transact...</div>
+</main>
+
+<script>
+  const feedEl = document.getElementById("feed");
+  const emptyEl = document.getElementById("empty");
+  const statusEl = document.getElementById("status");
+  const enableBtn = document.getElementById("enable-btn");
+
+  let seenIds = new Set();
+  let firstLoad = true;
+
+  function shortWallet(w) {
+    if (!w || w.length < 10) return w;
+    return w.slice(0, 4) + "..." + w.slice(-4);
+  }
+
+  function timeAgo(ts) {
+    const diff = Math.floor((Date.now() - ts) / 1000);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return new Date(ts).toLocaleDateString();
+  }
+
+  function render(events) {
+    if (events.length === 0) {
+      emptyEl.style.display = "block";
+      feedEl.innerHTML = "";
+      return;
+    }
+    emptyEl.style.display = "none";
+    feedEl.innerHTML = events.map(ev => `
+      <div class="event">
+        <div class="left">
+          <div class="desc">${ev.description || ev.type}</div>
+          <div class="wallet">${shortWallet(ev.wallet)}</div>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px;">
+          <span class="badge ${ev.type}">${ev.type}</span>
+          <span class="time">${timeAgo(ev.timestamp)}</span>
+        </div>
+      </div>
+    `).join("");
+  }
+
+  function notify(ev) {
+    if (Notification.permission !== "granted") return;
+    new Notification("Wallet activity", {
+      body: ev.description || `${ev.type} on ${shortWallet(ev.wallet)}`,
+    });
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch("/api/activity?limit=100");
+      const events = await res.json();
+      statusEl.textContent = `Live \u2022 ${events.length} recent events`;
+
+      if (!firstLoad) {
+        const newOnes = events.filter(e => !seenIds.has(e.id));
+        newOnes.reverse().forEach(notify); // oldest of the new batch first
+      }
+      seenIds = new Set(events.map(e => e.id));
+      firstLoad = false;
+
+      render(events);
+    } catch (e) {
+      statusEl.textContent = "Connection error, retrying...";
+    }
+  }
+
+  enableBtn.addEventListener("click", async () => {
+    const perm = await Notification.requestPermission();
+    enableBtn.textContent = perm === "granted" ? "Notifications on" : "Notifications blocked";
+  });
+
+  poll();
+  setInterval(poll, 5000);
+</script>
+
+</body>
+</html>
