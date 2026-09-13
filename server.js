@@ -122,6 +122,145 @@ app.delete("/api/wallets/:address", (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- fresh (uncached) live price lookup, for unrealized PNL ----------
+// Unlike getTokenMeta (cached forever - symbol/supply rarely change), price
+// changes constantly, so this always hits Helius fresh. Only called for
+// tokens a wallet currently holds, and only when the Wallets tab is opened -
+// not on every swap - so the extra cost stays small.
+async function getLivePriceUsd(mint) {
+  if (!HELIUS_API_KEY) return null;
+  try {
+    const res = await fetch(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "live-price",
+        method: "getAsset",
+        params: { id: mint, displayOptions: { showFungible: true } },
+      }),
+    });
+    const json = await res.json();
+    const priceInfo = json.result && json.result.token_info && json.result.token_info.price_info;
+    return priceInfo ? priceInfo.price_per_token : null;
+  } catch (e) {
+    console.warn(`[warn] failed to fetch live price for ${mint}:`, e.message);
+    return null;
+  }
+}
+
+// ---------- per-wallet, per-token PNL ----------
+// Uses the "average cost" accounting method: every buy adds to a running
+// average cost basis; every sell realizes profit/loss against that average
+// (not FIFO/LIFO). This only needs data we already stored - no live price
+// needed for realized PNL. Unrealized PNL (for tokens still held) is added
+// separately since it needs a live price.
+function computeWalletStats(address) {
+  const walletSwaps = events
+    .filter((e) => e.walletAddress === address && e.type === "SWAP" && e.mint)
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  const byMint = {};
+  for (const ev of walletSwaps) {
+    if (!byMint[ev.mint]) {
+      byMint[ev.mint] = {
+        mint: ev.mint,
+        symbol: ev.symbol,
+        buyAmountUsd: 0,
+        buyMcapWeighted: 0,
+        sellAmountUsd: 0,
+        sellMcapWeighted: 0,
+        realizedPnl: 0,
+        tokensHeld: 0,
+        costBasisUsd: 0,
+      };
+    }
+    const t = byMint[ev.mint];
+    if (ev.symbol) t.symbol = ev.symbol; // keep the most recently known symbol
+
+    if (ev.direction === "BUY") {
+      const usd = ev.quoteValueUsd || 0;
+      t.buyAmountUsd += usd;
+      if (ev.marketCapUsd != null && usd) t.buyMcapWeighted += ev.marketCapUsd * usd;
+      t.tokensHeld += ev.tokenAmount || 0;
+      t.costBasisUsd += usd;
+    } else if (ev.direction === "SELL") {
+      const sellUsd = ev.quoteValueUsd || 0;
+      t.sellAmountUsd += sellUsd;
+      if (ev.marketCapUsd != null && sellUsd) t.sellMcapWeighted += ev.marketCapUsd * sellUsd;
+
+      const avgCostPerToken = t.tokensHeld > 0 ? t.costBasisUsd / t.tokensHeld : 0;
+      // Guard against apparently selling more than we ever saw bought (e.g.
+      // if the buy happened before this dashboard started tracking).
+      const soldTokens = Math.min(ev.tokenAmount || 0, t.tokensHeld);
+      const costBasisOfSold = avgCostPerToken * soldTokens;
+
+      t.realizedPnl += sellUsd - costBasisOfSold;
+      t.tokensHeld -= soldTokens;
+      t.costBasisUsd -= costBasisOfSold;
+    }
+  }
+
+  return Object.values(byMint).map((t) => ({
+    mint: t.mint,
+    symbol: t.symbol,
+    buyAmountUsd: t.buyAmountUsd,
+    avgBoughtMcap: t.buyAmountUsd > 0 ? t.buyMcapWeighted / t.buyAmountUsd : null,
+    sellAmountUsd: t.sellAmountUsd,
+    avgSoldMcap: t.sellAmountUsd > 0 ? t.sellMcapWeighted / t.sellAmountUsd : 0,
+    realizedPnl: t.realizedPnl,
+    remainingTokens: t.tokensHeld,
+    remainingCostBasisUsd: t.costBasisUsd,
+  }));
+}
+
+app.get("/api/wallet-stats/:address", async (req, res) => {
+  const stats = computeWalletStats(req.params.address);
+
+  await Promise.all(
+    stats.map(async (s) => {
+      if (s.remainingTokens > 1e-6) {
+        const price = await getLivePriceUsd(s.mint);
+        if (price != null) {
+          s.currentPriceUsd = price;
+          s.currentValueUsd = price * s.remainingTokens;
+          s.unrealizedPnl = s.currentValueUsd - s.remainingCostBasisUsd;
+        } else {
+          s.currentPriceUsd = null;
+          s.currentValueUsd = null;
+          s.unrealizedPnl = null; // price unavailable (e.g. very new/illiquid token)
+        }
+      } else {
+        s.currentPriceUsd = null;
+        s.currentValueUsd = null;
+        s.unrealizedPnl = null; // nothing currently held
+      }
+    })
+  );
+
+  // Most interesting (biggest total PNL, positive or negative) first.
+  stats.sort((a, b) => {
+    const totalA = a.realizedPnl + (a.unrealizedPnl || 0);
+    const totalB = b.realizedPnl + (b.unrealizedPnl || 0);
+    return totalB - totalA;
+  });
+
+  res.json(stats);
+});
+
+// Full swap history for one wallet. Note: bounded by MAX_EVENTS overall
+// (the dashboard keeps the most recent 500 events across ALL wallets), so
+// very old activity may have aged out - this isn't a complete lifetime
+// history, just everything since this dashboard has been running.
+app.get("/api/wallet-history/:address", (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 200;
+  const history = events
+    .filter((e) => e.walletAddress === req.params.address)
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, limit);
+  res.json(history);
+});
+
 // ---------- parsing a Helius enhanced SWAP transaction ----------
 // Helius doesn't always populate a clean "events.swap" object (confirmed
 // empty on real PUMP_AMM/Fomo-routed swaps). Instead of relying on that, we
