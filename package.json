@@ -1,0 +1,15 @@
+{
+  "name": "wallet-activity-dashboard",
+  "version": "1.0.0",
+  "description": "Live dashboard for Solana wallet buy/sell activity via Helius webhooks",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
