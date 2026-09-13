@@ -76,33 +76,76 @@ refreshSolPrice();
 setInterval(refreshSolPrice, 5 * 60 * 1000);
 
 // ---------- token metadata (symbol, name), cached forever per mint ----------
-// Reads directly from Solana's on-chain Metaplex Token Metadata program,
-// via a free public RPC node - costs ZERO Helius credits, no matter how
-// many new tokens appear. The account layout (name/symbol as length-prefixed
-// strings right after a fixed header) has been stable since the program's
-// original launch and hasn't broken backward compatibility.
+// Reads directly from Solana on-chain data via a free public RPC node - costs
+// ZERO Helius credits, no matter how many new tokens appear.
+//
+// Two possible sources, tried in order:
+// 1. Classic Metaplex Token Metadata program - a separate PDA account, used
+//    by older/standard SPL tokens. Layout stable since program launch.
+// 2. Token-2022's embedded metadata extension - newer tokens (confirmed:
+//    some current pump.fun launches) store name/symbol/uri directly inside
+//    the mint account itself via a TLV-encoded extension, not a separate
+//    PDA. Verified byte-for-byte against a real FUZED mint account before
+//    shipping this - see the TokenMetadata Interface layout below.
 //
 // We no longer fetch "supply" here since we dropped market cap - price is
 // computed for free from the swap itself (spent/received divided by token
 // amount), so there was no other reason left to call a paid endpoint.
 const { PublicKey } = require("@solana/web3.js");
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
+const TOKEN_2022_METADATA_EXTENSION_TYPE = 19; // ExtensionType::TokenMetadata
 const PUBLIC_SOLANA_RPC = "https://api.mainnet-beta.solana.com";
 
+async function rpcGetAccountInfo(address) {
+  const res = await fetch(PUBLIC_SOLANA_RPC, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "token-meta",
+      method: "getAccountInfo",
+      params: [address, { encoding: "base64" }],
+    }),
+  });
+  const json = await res.json();
+  return json.result && json.result.value;
+}
+
+function readBorshString(buffer, offset) {
+  const length = buffer.readUInt32LE(offset);
+  const value = buffer.slice(offset + 4, offset + 4 + length).toString("utf8");
+  return { value, nextOffset: offset + 4 + length };
+}
+
+// Classic Metaplex layout: key(1) + updateAuthority(32) + mint(32) = 65 byte
+// header, then Borsh strings: name, then symbol.
 function parseMetaplexNameSymbol(buffer) {
-  // Layout: key(1) + updateAuthority(32) + mint(32) = 65 byte header, then
-  // Borsh strings: u32 LE length prefix + UTF8 bytes, for name then symbol.
   let offset = 65;
-  const nameLen = buffer.readUInt32LE(offset);
-  offset += 4;
-  const name = buffer.slice(offset, offset + nameLen).toString("utf8").replace(/\0/g, "").trim();
-  offset += nameLen;
+  const name = readBorshString(buffer, offset);
+  offset = name.nextOffset;
+  const symbol = readBorshString(buffer, offset);
+  return { name: name.value.replace(/\0/g, "").trim(), symbol: symbol.value.replace(/\0/g, "").trim() };
+}
 
-  const symbolLen = buffer.readUInt32LE(offset);
-  offset += 4;
-  const symbol = buffer.slice(offset, offset + symbolLen).toString("utf8").replace(/\0/g, "").trim();
-
-  return { name, symbol };
+// Token-2022 embedded metadata: find the TLV extension of type 19
+// (TokenMetadata) by scanning for a header whose declared length reaches
+// exactly to the end of the account data (true for the last/only metadata
+// extension - verified against real data). Payload layout per the SPL Token
+// Metadata Interface: update_authority(32) + mint(32) + name(String) +
+// symbol(String) + ...
+function parseToken2022NameSymbol(buffer) {
+  for (let pos = 0; pos < buffer.length - 4; pos++) {
+    const extType = buffer.readUInt16LE(pos);
+    const extLen = buffer.readUInt16LE(pos + 2);
+    if (extType === TOKEN_2022_METADATA_EXTENSION_TYPE && pos + 4 + extLen === buffer.length) {
+      let offset = pos + 4 + 32 + 32; // skip header, update_authority, mint
+      const name = readBorshString(buffer, offset);
+      offset = name.nextOffset;
+      const symbol = readBorshString(buffer, offset);
+      return { name: name.value, symbol: symbol.value };
+    }
+  }
+  return null;
 }
 
 async function getTokenMeta(mint) {
@@ -111,46 +154,34 @@ async function getTokenMeta(mint) {
 
   try {
     const mintPubkey = new PublicKey(mint);
+
+    // Try 1: classic Metaplex PDA.
     const [metadataPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("metadata"), TOKEN_METADATA_PROGRAM_ID.toBuffer(), mintPubkey.toBuffer()],
       TOKEN_METADATA_PROGRAM_ID
     );
+    const metaplexAccount = await rpcGetAccountInfo(metadataPda.toBase58());
 
-    const res = await fetch(PUBLIC_SOLANA_RPC, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "token-meta",
-        method: "getAccountInfo",
-        params: [metadataPda.toBase58(), { encoding: "base64" }],
-      }),
-    });
-    const json = await res.json();
-    const accountInfo = json.result && json.result.value;
+    let result = null;
+    if (metaplexAccount) {
+      const buffer = Buffer.from(metaplexAccount.data[0], "base64");
+      result = parseMetaplexNameSymbol(buffer);
+    } else {
+      // Try 2: Token-2022 embedded metadata, read from the mint account itself.
+      const mintAccount = await rpcGetAccountInfo(mint);
+      if (mintAccount) {
+        const buffer = Buffer.from(mintAccount.data[0], "base64");
+        result = parseToken2022NameSymbol(buffer);
+      }
+    }
 
-    // TEMPORARY debug line - remove once we've confirmed this is working
-    // correctly against real data.
-    console.log(
-      `[debug] token meta lookup: mint=${mint} pda=${metadataPda.toBase58()} accountFound=${!!accountInfo}`
-    );
-
-    if (!accountInfo) {
-      // No on-chain metadata found at this address. Do NOT cache this as
-      // permanent - it might be a transient RPC issue (rate limit, node
-      // lag) rather than the token genuinely having no metadata. Returning
-      // null here means we'll just try again on the next swap instead of
-      // giving up on this token forever.
+    if (!result) {
+      // Genuinely no metadata found either way. Don't cache this - could be
+      // a transient RPC issue rather than the token truly having none.
       return null;
     }
 
-    const buffer = Buffer.from(accountInfo.data[0], "base64");
-    const { name, symbol } = parseMetaplexNameSymbol(buffer);
-
-    // TEMPORARY debug line - remove once confirmed working.
-    console.log(`[debug] token meta parsed: mint=${mint} name="${name}" symbol="${symbol}"`);
-
-    const meta = { symbol: symbol || null, name: name || null, fetchedAt: Date.now() };
+    const meta = { symbol: result.symbol || null, name: result.name || null, fetchedAt: Date.now() };
     tokenCache[mint] = meta;
     saveJson(TOKEN_CACHE_FILE, tokenCache);
     return meta;
