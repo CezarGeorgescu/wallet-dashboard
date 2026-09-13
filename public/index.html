@@ -12,8 +12,9 @@
     --text: #e8e9ec;
     --muted: #8b8f9b;
     --accent: #6ee7b7;
+    --buy: #6ee7b7;
+    --sell: #f87171;
     --swap: #f0b429;
-    --transfer: #60a5fa;
   }
   * { box-sizing: border-box; }
   body {
@@ -23,15 +24,17 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
   header {
-    padding: 24px 32px;
+    padding: 20px 32px;
     border-bottom: 1px solid var(--border);
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
   }
   h1 { font-size: 20px; margin: 0; }
   #status { color: var(--muted); font-size: 13px; }
-  #enable-btn {
+  button {
     background: var(--accent);
     border: none;
     color: #0f1115;
@@ -39,34 +42,77 @@
     border-radius: 6px;
     font-weight: 600;
     cursor: pointer;
+    font-size: 13px;
+  }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
   }
   main { padding: 24px 32px; max-width: 900px; margin: 0 auto; }
+
+  /* Wallet manager */
+  #wallet-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 24px;
+  }
+  #wallet-panel h2 { font-size: 14px; margin: 0 0 12px 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .wallet-form { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .wallet-form input {
+    background: #0f1115;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .wallet-form input[name="address"] { flex: 2; min-width: 200px; font-family: monospace; }
+  .wallet-form input[name="label"] { flex: 1; min-width: 120px; }
+  .wallet-list { display: flex; flex-direction: column; gap: 6px; }
+  .wallet-row {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13px; padding: 6px 8px; border-radius: 6px;
+  }
+  .wallet-row:hover { background: rgba(255,255,255,0.03); }
+  .wallet-row .addr { font-family: monospace; color: var(--muted); }
+  .wallet-row .remove { color: var(--sell); cursor: pointer; font-size: 12px; background: none; padding: 2px 6px; }
+
+  /* Event feed */
   .event {
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 14px 16px;
     margin-bottom: 10px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
   }
-  .event .left { display: flex; flex-direction: column; gap: 4px; }
-  .wallet { font-family: monospace; font-size: 13px; color: var(--muted); }
-  .desc { font-size: 14px; }
+  .event-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .ticker-row { display: flex; align-items: center; gap: 8px; }
+  .ticker { font-size: 17px; font-weight: 700; }
   .badge {
-    font-size: 11px;
-    padding: 3px 8px;
-    border-radius: 999px;
-    text-transform: uppercase;
-    font-weight: 700;
-    white-space: nowrap;
+    font-size: 11px; padding: 3px 8px; border-radius: 999px;
+    text-transform: uppercase; font-weight: 700; white-space: nowrap;
   }
-  .badge.SWAP { background: rgba(240,180,41,0.15); color: var(--swap); }
-  .badge.TRANSFER { background: rgba(96,165,250,0.15); color: var(--transfer); }
-  .badge.UNKNOWN { background: rgba(139,143,155,0.15); color: var(--muted); }
-  .time { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .badge.BUY { background: rgba(110,231,183,0.15); color: var(--buy); }
+  .badge.SELL { background: rgba(248,113,113,0.15); color: var(--sell); }
+  .badge.OTHER { background: rgba(139,143,155,0.15); color: var(--muted); }
+  .ca-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+  .ca { font-family: monospace; font-size: 12px; color: var(--muted); }
+  .copy-btn {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    padding: 2px 8px; border-radius: 5px; font-size: 11px; cursor: pointer;
+  }
+  .copy-btn.copied { color: var(--accent); border-color: var(--accent); }
+  .wallet-name { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .stats-row {
+    display: flex; gap: 20px; margin-top: 10px; flex-wrap: wrap;
+    font-size: 13px;
+  }
+  .stat-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .stat-value { font-weight: 600; }
+  .time { font-size: 12px; color: var(--muted); white-space: nowrap; text-align: right; }
   #empty { color: var(--muted); text-align: center; margin-top: 60px; }
 </style>
 </head>
@@ -81,6 +127,16 @@
 </header>
 
 <main>
+  <div id="wallet-panel">
+    <h2>Named Wallets</h2>
+    <form class="wallet-form" id="wallet-form">
+      <input name="address" placeholder="Wallet address" required />
+      <input name="label" placeholder="Name (e.g. Whale #1)" required />
+      <button type="submit">Save</button>
+    </form>
+    <div class="wallet-list" id="wallet-list"></div>
+  </div>
+
   <div id="feed"></div>
   <div id="empty" style="display:none;">No activity yet. Waiting for a watched wallet to transact...</div>
 </main>
@@ -90,11 +146,14 @@
   const emptyEl = document.getElementById("empty");
   const statusEl = document.getElementById("status");
   const enableBtn = document.getElementById("enable-btn");
+  const walletListEl = document.getElementById("wallet-list");
+  const walletForm = document.getElementById("wallet-form");
 
   let seenIds = new Set();
   let firstLoad = true;
+  let walletLabels = {};
 
-  function shortWallet(w) {
+  function shortAddr(w) {
     if (!w || w.length < 10) return w;
     return w.slice(0, 4) + "..." + w.slice(-4);
   }
@@ -107,6 +166,123 @@
     return new Date(ts).toLocaleDateString();
   }
 
+  function formatNumber(n) {
+    if (n == null) return "N/A";
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(2) + "K";
+    return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  }
+
+  function formatUsd(n) {
+    if (n == null) return "N/A";
+    return "$" + formatNumber(n);
+  }
+
+  // ---------- wallet manager ----------
+  async function loadWallets() {
+    try {
+      const res = await fetch("/api/wallets");
+      walletLabels = await res.json();
+      renderWalletList();
+    } catch (e) {
+      console.warn("failed to load wallets", e);
+    }
+  }
+
+  function renderWalletList() {
+    const entries = Object.entries(walletLabels);
+    if (entries.length === 0) {
+      walletListEl.innerHTML = `<div style="color:var(--muted); font-size:13px;">No wallets named yet.</div>`;
+      return;
+    }
+    walletListEl.innerHTML = entries.map(([addr, label]) => `
+      <div class="wallet-row">
+        <span><strong>${label}</strong> <span class="addr">${shortAddr(addr)}</span></span>
+        <button class="remove" data-addr="${addr}">remove</button>
+      </div>
+    `).join("");
+
+    walletListEl.querySelectorAll(".remove").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await fetch(`/api/wallets/${btn.dataset.addr}`, { method: "DELETE" });
+        await loadWallets();
+      });
+    });
+  }
+
+  walletForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const address = walletForm.address.value.trim();
+    const label = walletForm.label.value.trim();
+    if (!address || !label) return;
+    await fetch("/api/wallets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address, label }),
+    });
+    walletForm.reset();
+    await loadWallets();
+    poll(); // refresh feed so labels apply immediately
+  });
+
+  // ---------- copy to clipboard ----------
+  function copyToClipboard(text, btn) {
+    navigator.clipboard.writeText(text).then(() => {
+      const original = btn.textContent;
+      btn.textContent = "Copied!";
+      btn.classList.add("copied");
+      setTimeout(() => { btn.textContent = original; btn.classList.remove("copied"); }, 1500);
+    });
+  }
+  window.copyToClipboard = copyToClipboard;
+
+  // ---------- feed ----------
+  function renderEvent(ev) {
+    const isSwap = ev.type === "SWAP" && ev.mint;
+    const directionClass = ev.direction === "BUY" ? "BUY" : ev.direction === "SELL" ? "SELL" : "OTHER";
+    const ticker = ev.symbol ? `$${ev.symbol}` : (isSwap ? shortAddr(ev.mint) : ev.type);
+    const walletDisplay = ev.walletLabel || shortAddr(ev.walletAddress);
+    const exactTime = new Date(ev.timestamp).toLocaleString();
+
+    return `
+      <div class="event">
+        <div class="event-top">
+          <div>
+            <div class="ticker-row">
+              <span class="ticker">${ticker}</span>
+              ${isSwap ? `<span class="badge ${directionClass}">${ev.direction}</span>` : `<span class="badge OTHER">${ev.type}</span>`}
+            </div>
+            ${isSwap ? `
+              <div class="ca-row">
+                <span class="ca">${ev.mint}</span>
+                <button class="copy-btn" onclick="copyToClipboard('${ev.mint}', this)">Copy</button>
+              </div>
+            ` : ""}
+            <div class="wallet-name">${walletDisplay}</div>
+          </div>
+          <div class="time" title="${exactTime}">${timeAgo(ev.timestamp)}</div>
+        </div>
+        ${isSwap ? `
+          <div class="stats-row">
+            <div>
+              <div class="stat-label">Amount</div>
+              <div class="stat-value">${formatNumber(ev.tokenAmount)} ${ev.symbol || ""}</div>
+            </div>
+            <div>
+              <div class="stat-label">SOL</div>
+              <div class="stat-value">${ev.solAmount ? ev.solAmount.toFixed(4) : "N/A"}</div>
+            </div>
+            <div>
+              <div class="stat-label">Market Cap</div>
+              <div class="stat-value">${formatUsd(ev.marketCapUsd)}</div>
+            </div>
+          </div>
+        ` : `<div class="wallet-name" style="margin-top:8px;">${ev.description || ""}</div>`}
+      </div>
+    `;
+  }
+
   function render(events) {
     if (events.length === 0) {
       emptyEl.style.display = "block";
@@ -114,24 +290,15 @@
       return;
     }
     emptyEl.style.display = "none";
-    feedEl.innerHTML = events.map(ev => `
-      <div class="event">
-        <div class="left">
-          <div class="desc">${ev.description || ev.type}</div>
-          <div class="wallet">${shortWallet(ev.wallet)}</div>
-        </div>
-        <div style="display:flex; align-items:center; gap:12px;">
-          <span class="badge ${ev.type}">${ev.type}</span>
-          <span class="time">${timeAgo(ev.timestamp)}</span>
-        </div>
-      </div>
-    `).join("");
+    feedEl.innerHTML = events.map(renderEvent).join("");
   }
 
   function notify(ev) {
     if (Notification.permission !== "granted") return;
+    const ticker = ev.symbol ? `$${ev.symbol}` : ev.type;
+    const who = ev.walletLabel || shortAddr(ev.walletAddress);
     new Notification("Wallet activity", {
-      body: ev.description || `${ev.type} on ${shortWallet(ev.wallet)}`,
+      body: `${who}: ${ev.direction || ev.type} ${ticker}`,
     });
   }
 
@@ -143,7 +310,7 @@
 
       if (!firstLoad) {
         const newOnes = events.filter(e => !seenIds.has(e.id));
-        newOnes.reverse().forEach(notify); // oldest of the new batch first
+        newOnes.reverse().forEach(notify);
       }
       seenIds = new Set(events.map(e => e.id));
       firstLoad = false;
@@ -159,6 +326,7 @@
     enableBtn.textContent = perm === "granted" ? "Notifications on" : "Notifications blocked";
   });
 
+  loadWallets();
   poll();
   setInterval(poll, 5000);
 </script>
