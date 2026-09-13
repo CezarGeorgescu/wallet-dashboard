@@ -534,7 +534,9 @@ const EVM_QUOTE_IDS = new Set([NATIVE_ETH]);
 function findWatchedEvmAddress(activities, chain) {
   const knownMap = {}; // lowercase address -> original-cased address (for label lookup)
   for (const [addr, info] of Object.entries(wallets)) {
-    if (info.chain === chain) knownMap[addr.toLowerCase()] = addr;
+    // "evm" means "watch this address on every EVM chain" - saves adding
+    // the same address three times when it's the same wallet on all of them.
+    if (info.chain === chain || info.chain === "evm") knownMap[addr.toLowerCase()] = addr;
   }
   for (const act of activities) {
     const from = act.fromAddress && act.fromAddress.toLowerCase();
