@@ -623,8 +623,14 @@ function extractEvmSwapLegs(activities, watchedAddressLower, chain) {
     }
   }
 
+  const direction = coinAmount > 0 ? "BUY" : "SELL";
+  // Common EVM spam pattern: an unsolicited token airdrop straight into the
+  // wallet, with no native currency ever spent - a real buy always costs
+  // something. Treat "received a token for $0" as spam, not a trade.
+  if (direction === "BUY" && !quoteAmount) return null;
+
   return {
-    direction: coinAmount > 0 ? "BUY" : "SELL",
+    direction,
     mint: coinId === NATIVE_ETH ? null : coinId, // contract address, lowercase
     symbol: (assetMeta[coinId] && assetMeta[coinId].symbol) || null,
     tokenAmount: Math.abs(coinAmount),
