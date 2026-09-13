@@ -168,16 +168,16 @@
           <tr>
             <th>Token</th>
             <th>Buy Amount</th>
-            <th>Avg Bought</th>
+            <th>Avg Bought Price</th>
             <th>Sell Amount</th>
-            <th>Avg Sold</th>
+            <th>Avg Sold Price</th>
             <th>Realized PNL</th>
-            <th>Unrealized PNL</th>
           </tr>
         </thead>
         <tbody id="pnl-body"></tbody>
       </table>
       <div id="pnl-empty" style="display:none; color:var(--muted); margin-bottom:20px;">No swaps recorded for this wallet yet.</div>
+      <div style="color:var(--muted); font-size:12px; margin-top:-14px; margin-bottom:20px;">All computed from recorded trades \u2014 no live lookups, no ongoing cost.</div>
 
       <h3 class="section-title">Recent History</h3>
       <div id="wallet-history"></div>
@@ -231,6 +231,16 @@
     return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
   }
   function formatUsd(n) { return n == null ? "N/A" : "$" + formatNumber(n); }
+  function formatPrice(n) {
+    // Token prices are often tiny fractions of a cent - formatUsd's K/M/B
+    // rounding would show "$0" for those, so this scales decimal places to
+    // the magnitude instead.
+    if (n == null) return "N/A";
+    if (n === 0) return "$0";
+    const abs = Math.abs(n);
+    const decimals = abs >= 1 ? 2 : abs >= 0.01 ? 4 : abs >= 0.0001 ? 6 : 9;
+    return "$" + n.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
+  }
   function formatPnl(n) {
     if (n == null) return `<span class="pnl-na">N/A</span>`;
     const cls = n > 0 ? "pnl-pos" : n < 0 ? "pnl-neg" : "";
@@ -323,7 +333,7 @@
   });
 
   async function loadWalletPnl(address) {
-    pnlBody.innerHTML = `<tr><td colspan="7" style="color:var(--muted);">Loading (fetching live prices for open positions)...</td></tr>`;
+    pnlBody.innerHTML = `<tr><td colspan="6" style="color:var(--muted);">Loading...</td></tr>`;
     pnlEmpty.style.display = "none";
     try {
       const res = await fetch(`/api/wallet-stats/${address}`);
@@ -337,15 +347,14 @@
         <tr>
           <td class="pnl-token">${r.symbol ? "$" + r.symbol : shortAddr(r.mint)}</td>
           <td>${formatUsd(r.buyAmountUsd)}</td>
-          <td>${formatUsd(r.avgBoughtMcap)}</td>
+          <td>${formatPrice(r.avgBoughtPrice)}</td>
           <td>${formatUsd(r.sellAmountUsd)}</td>
-          <td>${formatUsd(r.avgSoldMcap)}</td>
+          <td>${formatPrice(r.avgSoldPrice)}</td>
           <td>${formatPnl(r.realizedPnl)}</td>
-          <td>${formatPnl(r.unrealizedPnl)}</td>
         </tr>
       `).join("");
     } catch (e) {
-      pnlBody.innerHTML = `<tr><td colspan="7" style="color:var(--sell);">Failed to load.</td></tr>`;
+      pnlBody.innerHTML = `<tr><td colspan="6" style="color:var(--sell);">Failed to load.</td></tr>`;
     }
   }
 
@@ -397,8 +406,8 @@
               <div class="stat-value">${ev.quoteValueUsd != null ? "$" + ev.quoteValueUsd.toFixed(2) : "N/A"}${ev.quoteSymbol ? ` (${ev.quoteAmount != null ? ev.quoteAmount.toFixed(4) : ""} ${ev.quoteSymbol})` : ""}</div>
             </div>
             <div>
-              <div class="stat-label">Market Cap</div>
-              <div class="stat-value">${formatUsd(ev.marketCapUsd)}</div>
+              <div class="stat-label">Price</div>
+              <div class="stat-value">${formatPrice(ev.priceUsd)}</div>
             </div>
           </div>
         ` : `<div class="wallet-name" style="margin-top:8px;">${ev.description || ""}</div>`}
