@@ -421,14 +421,13 @@ async function buildEvent(tx) {
 
   const legs = extractSwapLegs(tx);
   if (!legs) {
-    // Log the full raw transaction ONLY when parsing fails to find a coin
-    // leg, so we can diagnose real gaps without flooding logs on every
-    // normal event. Safe to remove once no longer needed for debugging.
-    console.log(
-      `[debug] extractSwapLegs found nothing for signature=${tx.signature}, raw tx:`,
-      JSON.stringify(tx)
-    );
-    return base;
+    // No genuine coin trade found for our wallet in this transaction - it's
+    // usually because our address was just a minor pass-through/rebate
+    // recipient in someone else's much bigger routed transaction (confirmed
+    // on a real OKX DEX Router case: our wallet received a tiny incidental
+    // USDC amount inside a swap that wasn't ours at all). Skip it entirely
+    // rather than showing a noisy, meaningless card.
+    return null;
   }
 
   const meta = await getTokenMeta(legs.mint);
@@ -459,10 +458,11 @@ app.post("/webhook", (req, res) => {
   const body = Array.isArray(req.body) ? req.body : [req.body];
   Promise.all(body.map(buildEvent))
     .then((newEvents) => {
-      events = [...events, ...newEvents];
+      const filtered = newEvents.filter((e) => e !== null); // drop non-trades (see buildEvent)
+      events = [...events, ...filtered];
       if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
       saveJson(ACTIVITY_FILE, events);
-      console.log(`[webhook] stored ${newEvents.length} event(s)`);
+      console.log(`[webhook] stored ${filtered.length} event(s) (${newEvents.length - filtered.length} skipped, no real trade)`);
     })
     .catch((e) => console.error("[error] processing webhook:", e));
 });
