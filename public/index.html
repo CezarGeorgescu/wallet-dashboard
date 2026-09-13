@@ -270,8 +270,8 @@
               <div class="stat-value">${formatNumber(ev.tokenAmount)} ${ev.symbol || ""}</div>
             </div>
             <div>
-              <div class="stat-label">SOL</div>
-              <div class="stat-value">${ev.solAmount ? ev.solAmount.toFixed(4) : "N/A"}</div>
+              <div class="stat-label">${ev.direction === "SELL" ? "Received" : "Spent"}</div>
+              <div class="stat-value">${ev.quoteValueUsd != null ? "$" + ev.quoteValueUsd.toFixed(2) : "N/A"}${ev.quoteSymbol ? ` (${ev.quoteAmount != null ? ev.quoteAmount.toFixed(4) : ""} ${ev.quoteSymbol})` : ""}</div>
             </div>
             <div>
               <div class="stat-label">Market Cap</div>
