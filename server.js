@@ -20,11 +20,22 @@ const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "";
 // as the Helius webhook's "Authorization Header" field if you use one).
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "";
 
-const ACTIVITY_FILE = path.join(__dirname, "activity.json");
-const WALLETS_FILE = path.join(__dirname, "wallets.json");
-const TOKEN_CACHE_FILE = path.join(__dirname, "token-cache.json");
+// Where data files live. On Render, __dirname is wiped on every redeploy -
+// set DATA_DIR to a mounted persistent disk's path (e.g. /var/data) in
+// Render's Environment tab so activity/wallets/cache survive redeploys.
+// Falls back to __dirname for local development.
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const ACTIVITY_FILE = path.join(DATA_DIR, "activity.json");
+const WALLETS_FILE = path.join(DATA_DIR, "wallets.json");
+const TOKEN_CACHE_FILE = path.join(DATA_DIR, "token-cache.json");
 
-const MAX_EVENTS = 500;
+// Raised now that storage is persistent (was 500) - at 100 wallets, a small
+// cap fills up almost immediately. This is still a plain JSON file, not a
+// real database, so don't push this into the hundreds of thousands -
+// rewriting a huge file on every single event will eventually get slow. If
+// you outgrow this, the next step is a real database instead of raising
+// this further.
+const MAX_EVENTS = 20000;
 
 app.use(express.json({ limit: "5mb" }));
 app.use(express.static(path.join(__dirname, "public")));
