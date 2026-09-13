@@ -128,18 +128,27 @@ async function getTokenMeta(mint) {
     });
     const json = await res.json();
     const accountInfo = json.result && json.result.value;
+
+    // TEMPORARY debug line - remove once we've confirmed this is working
+    // correctly against real data.
+    console.log(
+      `[debug] token meta lookup: mint=${mint} pda=${metadataPda.toBase58()} accountFound=${!!accountInfo}`
+    );
+
     if (!accountInfo) {
-      // No on-chain metadata found for this mint (rare, but possible for
-      // very obscure/custom tokens). Cache a "no symbol" result so we don't
-      // keep retrying it on every swap.
-      const meta = { symbol: null, name: null, fetchedAt: Date.now() };
-      tokenCache[mint] = meta;
-      saveJson(TOKEN_CACHE_FILE, tokenCache);
-      return meta;
+      // No on-chain metadata found at this address. Do NOT cache this as
+      // permanent - it might be a transient RPC issue (rate limit, node
+      // lag) rather than the token genuinely having no metadata. Returning
+      // null here means we'll just try again on the next swap instead of
+      // giving up on this token forever.
+      return null;
     }
 
     const buffer = Buffer.from(accountInfo.data[0], "base64");
     const { name, symbol } = parseMetaplexNameSymbol(buffer);
+
+    // TEMPORARY debug line - remove once confirmed working.
+    console.log(`[debug] token meta parsed: mint=${mint} name="${name}" symbol="${symbol}"`);
 
     const meta = { symbol: symbol || null, name: name || null, fetchedAt: Date.now() };
     tokenCache[mint] = meta;
