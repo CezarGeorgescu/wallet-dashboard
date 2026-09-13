@@ -62,6 +62,14 @@
   }
   .wallet-form input[name="address"] { flex: 2; min-width: 200px; font-family: monospace; }
   .wallet-form input[name="label"] { flex: 1; min-width: 120px; }
+  .wallet-form select {
+    background: #0f1115; border: 1px solid var(--border); color: var(--text);
+    padding: 8px 10px; border-radius: 6px; font-size: 13px;
+  }
+  .chain-tag {
+    font-size: 10px; padding: 2px 6px; border-radius: 4px; text-transform: uppercase;
+    font-weight: 700; background: rgba(139,143,155,0.15); color: var(--muted); margin-left: 8px;
+  }
   .wallet-list { display: flex; flex-direction: column; gap: 6px; }
   .wallet-row {
     display: flex; justify-content: space-between; align-items: center;
@@ -114,7 +122,7 @@
     padding: 2px 8px; border-radius: 5px; font-size: 11px; cursor: pointer;
   }
   .copy-btn.copied { color: var(--accent); border-color: var(--accent); }
-  .wallet-name { font-size: 20px; color: var(--text); font-weight: 600; margin-bottom: 6px; }
+  .wallet-name { font-size: 15px; color: var(--text); font-weight: 600; margin-bottom: 6px; }
   .stats-row { display: flex; gap: 20px; margin-top: 10px; flex-wrap: wrap; font-size: 13px; }
   .stat-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
   .stat-value { font-weight: 600; }
@@ -151,6 +159,12 @@
       <form class="wallet-form" id="wallet-form">
         <input name="address" placeholder="Wallet address" required />
         <input name="label" placeholder="Name (e.g. Whale #1)" required />
+        <select name="chain" required>
+          <option value="solana">Solana</option>
+          <option value="ethereum">Ethereum</option>
+          <option value="base">Base</option>
+          <option value="robinhood">Robinhood Chain</option>
+        </select>
         <button type="submit">Save</button>
       </form>
       <div class="wallet-list" id="wallet-list"></div>
@@ -280,9 +294,9 @@
   function renderWalletList() {
     const entries = Object.entries(walletLabels);
     walletsEmptyEl.style.display = entries.length === 0 ? "block" : "none";
-    walletListEl.innerHTML = entries.map(([addr, label]) => `
+    walletListEl.innerHTML = entries.map(([addr, info]) => `
       <div class="wallet-row" data-addr="${addr}">
-        <span><strong>${label}</strong> <span class="addr">${shortAddr(addr)}</span></span>
+        <span><strong>${info.label}</strong> <span class="addr">${shortAddr(addr)}</span><span class="chain-tag">${info.chain}</span></span>
         <button class="remove" data-addr="${addr}">remove</button>
       </div>
     `).join("");
@@ -306,10 +320,11 @@
     e.preventDefault();
     const address = walletForm.address.value.trim();
     const label = walletForm.label.value.trim();
+    const chain = walletForm.chain.value;
     if (!address || !label) return;
     await fetch("/api/wallets", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ address, label }),
+      body: JSON.stringify({ address, label, chain }),
     });
     walletForm.reset();
     await loadWallets();
@@ -321,7 +336,7 @@
     openWalletAddress = address;
     walletPanelEl.style.display = "none";
     walletDetailEl.classList.add("active");
-    detailTitle.textContent = walletLabels[address] || shortAddr(address);
+    detailTitle.textContent = (walletLabels[address] && walletLabels[address].label) || shortAddr(address);
     detailAddr.textContent = address;
     await Promise.all([loadWalletPnl(address), loadWalletHistory(address)]);
   }
