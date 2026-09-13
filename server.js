@@ -140,35 +140,42 @@ function formatPrice(n) {
   return "$" + n.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 async function sendTelegramAlert(ev) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
 
-  const who = ev.walletLabel || ev.walletAddress;
+  const who = escapeHtml(ev.walletLabel || ev.walletAddress);
   let text;
 
   if (ev.type === "SWAP" && ev.mint !== undefined) {
     const emoji = ev.direction === "BUY" ? "\u{1F7E2}" : "\u{1F534}";
-    const ticker = ev.symbol ? `$${ev.symbol}` : "unknown token";
+    const ticker = ev.symbol ? `$${escapeHtml(ev.symbol)}` : "unknown token";
     const spentLabel = ev.direction === "SELL" ? "Received" : "Spent";
     const spent =
       ev.quoteValueUsd != null
-        ? `$${ev.quoteValueUsd.toFixed(2)}${ev.quoteSymbol ? ` (${ev.quoteAmount != null ? ev.quoteAmount.toFixed(4) : ""} ${ev.quoteSymbol})` : ""}`
+        ? `$${ev.quoteValueUsd.toFixed(2)}${ev.quoteSymbol ? ` (${ev.quoteAmount != null ? ev.quoteAmount.toFixed(4) : ""} ${escapeHtml(ev.quoteSymbol)})` : ""}`
         : "N/A";
+    // <code> renders as monospace and is tap-to-copy in Telegram clients -
+    // this is what makes the contract address copyable.
+    const caLine = ev.mint ? `\nCA: <code>${escapeHtml(ev.mint)}</code>` : "";
     text =
       `${emoji} ${ev.direction} ${ticker}\n` +
-      `${who}${ev.chain ? ` \u2022 ${ev.chain}` : ""}\n` +
+      `${who}${ev.chain ? ` \u2022 ${escapeHtml(ev.chain)}` : ""}${caLine}\n` +
       `Amount: ${ev.tokenAmount}\n` +
       `${spentLabel}: ${spent}\n` +
       `Price: ${formatPrice(ev.priceUsd)}`;
   } else {
-    text = `\u{1F4E9} ${ev.type}\n${who}${ev.chain ? ` \u2022 ${ev.chain}` : ""}\n${ev.description || ""}`;
+    text = `\u{1F4E9} ${escapeHtml(ev.type)}\n${who}${ev.chain ? ` \u2022 ${escapeHtml(ev.chain)}` : ""}\n${escapeHtml(ev.description || "")}`;
   }
 
   try {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "HTML" }),
     });
   } catch (e) {
     console.warn("[warn] failed to send Telegram alert:", e.message);
