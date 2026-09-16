@@ -499,9 +499,10 @@
 
   // ---------- sound alert (synthesized, no audio file needed) ----------
   // Browsers block audio until a user has interacted with the page at least
-  // once. We unlock the audio context on the "Enable Sound" click (a real
-  // user gesture), so later beeps triggered by the background polling
-  // timer are allowed to play.
+  // once - this is a hard restriction, no way to bypass it entirely. To
+  // make this as painless as possible, ANY click or keypress anywhere on
+  // the page (not just the "Enable Sound" button) unlocks it - see the
+  // listener near the bottom of this script.
   let audioCtx = null;
   function unlockAudio() {
     if (!audioCtx) {
@@ -511,19 +512,29 @@
       audioCtx.resume();
     }
   }
+
+  // A short ascending "cha-ching" style chime (three quick bell-like notes)
+  // instead of a flat beep - all synthesized, no audio file needed.
   function playBeep() {
-    if (!audioCtx) return; // not unlocked yet - user hasn't clicked "Enable Sound"
-    const duration = 1.2; // seconds
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.type = "sine";
-    osc.frequency.value = 880;
-    gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
-    osc.connect(gain);
-    gain.connect(audioCtx.destination);
-    osc.start();
-    osc.stop(audioCtx.currentTime + duration);
+    if (!audioCtx) return; // not unlocked yet - no interaction with the page so far
+    const notes = [
+      { freq: 1046.5, start: 0, duration: 0.12 },   // C6
+      { freq: 1318.5, start: 0.07, duration: 0.12 }, // E6
+      { freq: 1568.0, start: 0.14, duration: 0.35 }, // G6, longer ring tail
+    ];
+    notes.forEach(({ freq, start, duration }) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "triangle";
+      osc.frequency.value = freq;
+      const t0 = audioCtx.currentTime + start;
+      gain.gain.setValueAtTime(0.22, t0);
+      gain.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + duration);
+    });
   }
 
   async function poll() {
@@ -551,6 +562,20 @@
     unlockAudio();
     enableBtn.textContent = "Sound on";
   });
+
+  // Unlock on the very first click/keypress ANYWHERE on the page, not just
+  // the button - so sound turns on naturally as soon as you interact with
+  // the dashboard at all. Still requires one real interaction (browsers
+  // enforce this; it can't be skipped entirely), but this makes it as
+  // close to automatic as possible.
+  function unlockOnFirstInteraction() {
+    unlockAudio();
+    enableBtn.textContent = "Sound on";
+    document.removeEventListener("click", unlockOnFirstInteraction);
+    document.removeEventListener("keydown", unlockOnFirstInteraction);
+  }
+  document.addEventListener("click", unlockOnFirstInteraction);
+  document.addEventListener("keydown", unlockOnFirstInteraction);
 
   loadWallets();
   poll();
