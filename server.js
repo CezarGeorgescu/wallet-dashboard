@@ -188,17 +188,29 @@ async function sendTelegramAlert(ev) {
     // live price needed. % of supply uses the free on-chain supply fetched
     // alongside the token's symbol (see getTokenMeta).
     let holdsLine = "";
+    let avgBoughtLine = "";
+    let realizedPnlLine = "";
     const stats = computeWalletStats(ev.walletAddress).find((s) => s.mint === ev.mint);
     if (stats) {
       const pct = ev.supply ? ` (${((stats.remainingTokens / ev.supply) * 100).toFixed(2)}%)` : "";
       holdsLine = `\u{1F36F} Holds: ${formatNumberCompact(stats.remainingTokens)}${pct}`;
+
+      if (stats.avgBoughtPrice != null && ev.supply) {
+        const avgBoughtMcap = stats.avgBoughtPrice * ev.supply;
+        avgBoughtLine = `\n\u{1F4CA} Avg B: $${formatNumberCompact(avgBoughtMcap)} MC`;
+      }
+
+      const pnlSign = stats.realizedPnl > 0 ? "+" : stats.realizedPnl < 0 ? "-" : "";
+      realizedPnlLine = `\n\u{1F4B0} Realized PNL: ${pnlSign}$${Math.abs(stats.realizedPnl).toFixed(2)}`;
     }
+
+    const mcLine = ev.marketCapUsd != null ? `\n\u{1F4C8} MC: $${formatNumberCompact(ev.marketCapUsd)}` : "";
 
     text =
       `${emoji} ${ev.direction} ${ticker}${onSource}\n` +
       `${caLine}\n\n` +
-      `${swappedLine}\n` +
-      `${holdsLine}\n\n` +
+      `${swappedLine}${mcLine}\n` +
+      `${holdsLine}${avgBoughtLine}${realizedPnlLine}\n\n` +
       `\u{1F537} ${who}:\n` +
       `${balanceLines}`;
   } else {
@@ -605,18 +617,21 @@ async function buildEvent(tx) {
   const meta = await getTokenMeta(legs.mint);
   const priceUsd =
     legs.quoteValueUsd != null && legs.tokenAmount > 0 ? legs.quoteValueUsd / legs.tokenAmount : null;
+  const supply = (meta && meta.supply) || null;
+  const marketCapUsd = priceUsd != null && supply ? priceUsd * supply : null;
 
   return {
     ...base,
     direction: legs.direction,
     mint: legs.mint,
     symbol: (meta && meta.symbol) || null,
-    supply: (meta && meta.supply) || null,
+    supply,
     tokenAmount: legs.tokenAmount,
     quoteAmount: legs.quoteAmount,
     quoteSymbol: legs.quoteSymbol,
     quoteValueUsd: legs.quoteValueUsd,
     priceUsd,
+    marketCapUsd,
   };
 }
 
