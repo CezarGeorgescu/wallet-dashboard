@@ -140,6 +140,15 @@ function formatPrice(n) {
   return "$" + n.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+function formatNumberCompact(n) {
+  if (n == null) return "N/A";
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (abs >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (abs >= 1e3) return (n / 1e3).toFixed(2) + "K";
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
 function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -161,11 +170,22 @@ async function sendTelegramAlert(ev) {
     // <code> renders as monospace and is tap-to-copy in Telegram clients -
     // this is what makes the contract address copyable.
     const caLine = ev.mint ? `\nCA: <code>${escapeHtml(ev.mint)}</code>` : "";
+
+    // Current holdings after this trade, computed from stored history - no
+    // live price needed. % of supply uses the free on-chain supply fetched
+    // alongside the token's symbol (see getTokenMeta).
+    let holdsLine = "";
+    const stats = computeWalletStats(ev.walletAddress).find((s) => s.mint === ev.mint);
+    if (stats) {
+      const pct = ev.supply ? ` (${((stats.remainingTokens / ev.supply) * 100).toFixed(2)}%)` : "";
+      holdsLine = `\nHolds: ${formatNumberCompact(stats.remainingTokens)}${pct}`;
+    }
+
     text =
       `${emoji} ${ev.direction} ${ticker}\n` +
       `${who}${ev.chain ? ` \u2022 ${escapeHtml(ev.chain)}` : ""}${caLine}\n` +
       `Amount: ${ev.tokenAmount}\n` +
-      `${spentLabel}: ${spent}\n` +
+      `${spentLabel}: ${spent}${holdsLine}\n` +
       `Price: ${formatPrice(ev.priceUsd)}`;
   } else {
     text = `\u{1F4E9} ${escapeHtml(ev.type)}\n${who}${ev.chain ? ` \u2022 ${escapeHtml(ev.chain)}` : ""}\n${escapeHtml(ev.description || "")}`;
@@ -216,6 +236,30 @@ async function rpcGetAccountInfo(address) {
   });
   const json = await res.json();
   return json.result && json.result.value;
+}
+
+// Free, separate from price - total supply doesn't need a paid DAS call,
+// just a standard RPC method. Works for any Solana token, not just
+// pump.fun's fixed 1B ones.
+async function rpcGetTokenSupply(mint) {
+  try {
+    const res = await fetch(PUBLIC_SOLANA_RPC, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "token-supply",
+        method: "getTokenSupply",
+        params: [mint],
+      }),
+    });
+    const json = await res.json();
+    const value = json.result && json.result.value;
+    return value ? value.uiAmount : null; // already decimal-adjusted
+  } catch (e) {
+    console.warn(`[warn] failed to fetch token supply for ${mint}:`, e.message);
+    return null;
+  }
 }
 
 function readBorshString(buffer, offset) {
@@ -288,7 +332,8 @@ async function getTokenMeta(mint) {
       return null;
     }
 
-    const meta = { symbol: result.symbol || null, name: result.name || null, fetchedAt: Date.now() };
+    const supply = await rpcGetTokenSupply(mint); // free, separate call - doesn't block symbol resolution if it fails
+    const meta = { symbol: result.symbol || null, name: result.name || null, supply, fetchedAt: Date.now() };
     tokenCache[mint] = meta;
     saveJson(TOKEN_CACHE_FILE, tokenCache);
     return meta;
@@ -551,6 +596,7 @@ async function buildEvent(tx) {
     direction: legs.direction,
     mint: legs.mint,
     symbol: (meta && meta.symbol) || null,
+    supply: (meta && meta.supply) || null,
     tokenAmount: legs.tokenAmount,
     quoteAmount: legs.quoteAmount,
     quoteSymbol: legs.quoteSymbol,
