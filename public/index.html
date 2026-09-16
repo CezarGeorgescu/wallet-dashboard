@@ -96,6 +96,11 @@
   .pnl-token { font-weight: 700; }
   .pnl-pos { color: var(--buy); }
   .pnl-neg { color: var(--sell); }
+  .swap-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .swap-dot.BUY { background: var(--buy); }
+  .swap-dot.SELL { background: var(--sell); }
+  .stat-line { font-size: 13px; margin-top: 5px; }
+  .divider { border-top: 0.5px solid var(--border); margin: 10px 0; }
   .pnl-na { color: var(--muted); }
 
   h3.section-title { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 24px 0 12px 0; }
@@ -389,51 +394,86 @@
   // ---------- shared event card rendering ----------
   function renderEvent(ev) {
     const isSwap = ev.type === "SWAP" && ev.mint;
-    const directionClass = ev.direction === "BUY" ? "BUY" : ev.direction === "SELL" ? "SELL" : "OTHER";
-    const ticker = ev.symbol ? `$${ev.symbol}` : (isSwap ? shortAddr(ev.mint) : ev.type);
-    const walletDisplay = ev.walletLabel || shortAddr(ev.walletAddress);
+    if (!isSwap) {
+      const walletDisplay = ev.walletLabel || shortAddr(ev.walletAddress);
+      const exactTime = new Date(ev.timestamp).toLocaleString();
+      return `
+        <div class="event">
+          <div class="event-top">
+            <div>
+              <div class="wallet-name">${walletDisplay}</div>
+              <div class="ticker-row"><span class="ticker">${ev.type}</span></div>
+            </div>
+            <div class="time" title="${exactTime}">${timeAgo(ev.timestamp)}</div>
+          </div>
+          <div style="color:var(--muted); font-size:13px; margin-top:4px;">${ev.description || ""}</div>
+        </div>
+      `;
+    }
+
+    const ticker = ev.symbol || shortAddr(ev.mint);
+    const who = ev.walletLabel || shortAddr(ev.walletAddress);
     const exactTime = new Date(ev.timestamp).toLocaleString();
+    const onSource = ev.source ? ` <span style="color:var(--muted); font-weight:400; font-size:14px;">on ${ev.source}</span>` : "";
+
+    const coinAmountFmt = formatNumber(ev.tokenAmount);
+    const quoteAmountFmt = ev.quoteAmount != null ? ev.quoteAmount.toLocaleString(undefined, { maximumFractionDigits: 4 }) : "?";
+    const usdFmt = ev.quoteValueUsd != null ? "$" + ev.quoteValueUsd.toFixed(2) : "N/A";
+    const quoteSym = ev.quoteSymbol || "?";
+
+    let swappedLine, balanceLines;
+    if (ev.direction === "BUY") {
+      swappedLine = `\u{1F537} ${who} swapped ${quoteAmountFmt} (${usdFmt}) ${quoteSym} for ${coinAmountFmt} (${usdFmt}) ${ticker}`;
+      balanceLines = `
+        <div class="stat-line pnl-pos">${ticker}: +${coinAmountFmt} (${usdFmt})</div>
+        <div class="stat-line pnl-neg">${quoteSym}: -${quoteAmountFmt} (-${usdFmt})</div>`;
+    } else {
+      swappedLine = `\u{1F537} ${who} swapped ${coinAmountFmt} (${usdFmt}) ${ticker} for ${quoteAmountFmt} (${usdFmt}) ${quoteSym}`;
+      balanceLines = `
+        <div class="stat-line pnl-pos">${quoteSym}: +${quoteAmountFmt} (${usdFmt})</div>
+        <div class="stat-line pnl-neg">${ticker}: -${coinAmountFmt} (-${usdFmt})</div>`;
+    }
+
+    let holdsLine = "", avgBoughtLine = "", realizedPnlLine = "", mcLine = "";
+    if (ev.holdsAfter != null) {
+      const pct = ev.supply ? ` (${((ev.holdsAfter / ev.supply) * 100).toFixed(2)}%)` : "";
+      holdsLine = `<div class="stat-line">\u{1F36F} Holds: ${formatNumber(ev.holdsAfter)}${pct}</div>`;
+
+      if (ev.avgBoughtPrice != null && ev.supply) {
+        avgBoughtLine = `<div class="stat-line">\u{1F4CA} Avg B: ${formatUsd(ev.avgBoughtPrice * ev.supply)} MC</div>`;
+      }
+
+      const pnlClass = ev.realizedPnl > 0 ? "pnl-pos" : ev.realizedPnl < 0 ? "pnl-neg" : "";
+      const pnlSign = ev.realizedPnl > 0 ? "+" : ev.realizedPnl < 0 ? "-" : "";
+      realizedPnlLine = `<div class="stat-line ${pnlClass}">\u{1F4B0} Realized PNL: ${pnlSign}$${Math.abs(ev.realizedPnl).toFixed(2)}</div>`;
+    }
+    if (ev.marketCapUsd != null) {
+      mcLine = `<div class="stat-line">\u{1F3DB}\u{FE0F} MC: ${formatUsd(ev.marketCapUsd)}</div>`;
+    }
 
     return `
       <div class="event">
         <div class="event-top">
-          <div>
-            <div class="wallet-name">${walletDisplay}</div>
-            <div class="ticker-row">
-              <span class="ticker">${ticker}</span>
-              ${isSwap ? `<span class="badge ${directionClass}">${ev.direction}</span>` : `<span class="badge OTHER">${ev.type}</span>`}
-            </div>
-            ${isSwap ? `
-              <div class="ca-row">
-                <span class="ca">${ev.mint}</span>
-                <button class="copy-btn" onclick="copyToClipboard('${ev.mint}', this)">Copy</button>
-              </div>
-            ` : ""}
+          <div class="ticker-row">
+            <span class="swap-dot ${ev.direction}"></span>
+            <span class="ticker">${ev.direction} ${ticker}</span>${onSource}
           </div>
           <div class="time" title="${exactTime}">${timeAgo(ev.timestamp)}</div>
         </div>
-        ${isSwap ? `
-          <div class="stats-row">
-            <div>
-              <div class="stat-label">Amount</div>
-              <div class="stat-value">${formatNumber(ev.tokenAmount)} ${ev.symbol || ""}</div>
-            </div>
-            <div>
-              <div class="stat-label">${ev.direction === "SELL" ? "Received" : "Spent"}</div>
-              <div class="stat-value">${ev.quoteValueUsd != null ? "$" + ev.quoteValueUsd.toFixed(2) : "N/A"}${ev.quoteSymbol ? ` (${ev.quoteAmount != null ? ev.quoteAmount.toFixed(4) : ""} ${ev.quoteSymbol})` : ""}</div>
-            </div>
-            <div>
-              <div class="stat-label">Price</div>
-              <div class="stat-value">${formatPrice(ev.priceUsd)}</div>
-            </div>
-            <div>
-              <div class="stat-label">Market Cap</div>
-              <div class="stat-value">${formatUsd(ev.marketCapUsd)}</div>
-            </div>
-          </div>
-        ` : `<div style="color:var(--muted); font-size:13px; margin-top:4px;">${ev.description || ""}</div>`}
+        <div class="ca-row">
+          <span class="ca">${ev.mint}</span>
+          <button class="copy-btn" onclick="copyToClipboard('${ev.mint}', this)">Copy</button>
+          <span style="font-size:13px;">(${who})</span>
+        </div>
+        <div class="divider"></div>
+        <div class="stat-line">${swappedLine}</div>
+        ${holdsLine}${avgBoughtLine}${realizedPnlLine}${mcLine}
+        <div class="divider"></div>
+        <div class="wallet-name" style="margin-bottom:4px;">\u{1F537} ${who}:</div>
+        ${balanceLines}
       </div>
     `;
+  }
   }
 
   function renderFeed(events) {
