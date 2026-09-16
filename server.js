@@ -184,33 +184,33 @@ async function sendTelegramAlert(ev) {
       balanceLines = `${quoteSym}: +${quoteAmountFmt} (${usdFmt})\n${ticker}: -${coinAmountFmt} (-${usdFmt})`;
     }
 
-    // Current holdings after this trade, computed from stored history - no
-    // live price needed. % of supply uses the free on-chain supply fetched
-    // alongside the token's symbol (see getTokenMeta).
+    // Current holdings after this trade, avg-bought price, and realized PNL
+    // are attached onto the event by attachTradeStats() right when it was
+    // created - reading them here (instead of recomputing) keeps this
+    // message and the Feed showing identical numbers for this same trade.
     let holdsLine = "";
     let avgBoughtLine = "";
     let realizedPnlLine = "";
-    const stats = computeWalletStats(ev.walletAddress).find((s) => s.mint === ev.mint);
-    if (stats) {
-      const pct = ev.supply ? ` (${((stats.remainingTokens / ev.supply) * 100).toFixed(2)}%)` : "";
-      holdsLine = `\u{1F36F} Holds: ${formatNumberCompact(stats.remainingTokens)}${pct}`;
+    if (ev.holdsAfter != null) {
+      const pct = ev.supply ? ` (${((ev.holdsAfter / ev.supply) * 100).toFixed(2)}%)` : "";
+      holdsLine = `\u{1F36F} Holds: ${formatNumberCompact(ev.holdsAfter)}${pct}`;
 
-      if (stats.avgBoughtPrice != null && ev.supply) {
-        const avgBoughtMcap = stats.avgBoughtPrice * ev.supply;
+      if (ev.avgBoughtPrice != null && ev.supply) {
+        const avgBoughtMcap = ev.avgBoughtPrice * ev.supply;
         avgBoughtLine = `\n\u{1F4CA} Avg B: $${formatNumberCompact(avgBoughtMcap)} MC`;
       }
 
-      const pnlSign = stats.realizedPnl > 0 ? "+" : stats.realizedPnl < 0 ? "-" : "";
-      realizedPnlLine = `\n\u{1F4B0} Realized PNL: ${pnlSign}$${Math.abs(stats.realizedPnl).toFixed(2)}`;
+      const pnlSign = ev.realizedPnl > 0 ? "+" : ev.realizedPnl < 0 ? "-" : "";
+      realizedPnlLine = `\n\u{1F4B0} Realized PNL: ${pnlSign}$${Math.abs(ev.realizedPnl).toFixed(2)}`;
     }
 
-    const mcLine = ev.marketCapUsd != null ? `\n\u{1F4C8} MC: $${formatNumberCompact(ev.marketCapUsd)}` : "";
+    const mcLine = ev.marketCapUsd != null ? `\n\u{1F3DB}\u{FE0F} MC: $${formatNumberCompact(ev.marketCapUsd)}` : "";
 
     text =
       `${emoji} ${ev.direction} ${ticker}${onSource}\n` +
       `${caLine}\n\n` +
-      `${swappedLine}${mcLine}\n` +
-      `${holdsLine}${avgBoughtLine}${realizedPnlLine}\n\n` +
+      `${swappedLine}\n` +
+      `${holdsLine}${avgBoughtLine}${realizedPnlLine}${mcLine}\n\n` +
       `\u{1F537} ${who}:\n` +
       `${balanceLines}`;
   } else {
@@ -451,6 +451,22 @@ function computeWalletStats(address) {
   }));
 }
 
+// Snapshot each swap's running holdings/avg-bought/realized-PNL onto the
+// event itself, computed right after it's added to `events` (so the
+// computation includes this trade). This makes the Feed and Telegram show
+// the exact same numbers for a given trade, rather than Telegram computing
+// them fresh at send-time and the Feed having no record of them at all.
+function attachTradeStats(ev) {
+  if (ev.type !== "SWAP" || !ev.mint) return ev;
+  const stats = computeWalletStats(ev.walletAddress).find((s) => s.mint === ev.mint);
+  if (stats) {
+    ev.holdsAfter = stats.remainingTokens;
+    ev.avgBoughtPrice = stats.avgBoughtPrice;
+    ev.realizedPnl = stats.realizedPnl;
+  }
+  return ev;
+}
+
 app.get("/api/wallet-stats/:address", (req, res) => {
   const stats = computeWalletStats(req.params.address);
   // Most interesting (biggest realized PNL, positive or negative) first.
@@ -648,6 +664,7 @@ app.post("/webhook", (req, res) => {
     .then((newEvents) => {
       const filtered = newEvents.filter((e) => e !== null); // drop non-trades (see buildEvent)
       events = [...events, ...filtered];
+      filtered.forEach(attachTradeStats); // mutates in place - safe since these are the same objects now in `events`
       if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
       saveJson(ACTIVITY_FILE, events);
       filtered.forEach(sendTelegramAlert);
@@ -824,6 +841,7 @@ function processEvmGroup(hash) {
   };
 
   events = [...events, finalEvent];
+  attachTradeStats(finalEvent);
   if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
   saveJson(ACTIVITY_FILE, events);
   sendTelegramAlert(finalEvent);
