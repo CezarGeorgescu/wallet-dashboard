@@ -125,6 +125,7 @@
   .copy-btn {
     background: none; border: 1px solid var(--border); color: var(--muted);
     padding: 2px 8px; border-radius: 5px; font-size: 11px; cursor: pointer;
+    text-decoration: none; display: inline-block;
   }
   .copy-btn.copied { color: var(--accent); border-color: var(--accent); }
   .wallet-name { font-size: 15px; color: var(--text); font-weight: 600; margin-bottom: 6px; }
@@ -233,6 +234,12 @@
   let openWalletAddress = null;
 
   // ---------- helpers ----------
+  // fomo.family's URL naming doesn't always match our internal chain names -
+  // confirmed: base/ethereum/robinhood match ours exactly, but BSC is "bnb"
+  // there, not "bsc".
+  const FOMO_CHAIN_SLUG = { bsc: "bnb" };
+  function fomoChainSlug(chain) { return FOMO_CHAIN_SLUG[chain] || chain; }
+
   function shortAddr(w) {
     if (!w || w.length < 10) return w;
     return w.slice(0, 4) + "..." + w.slice(-4);
@@ -463,6 +470,7 @@
         <div class="ca-row">
           <span class="ca">${ev.mint}</span>
           <button class="copy-btn" onclick="copyToClipboard('${ev.mint}', this)">Copy</button>
+          <a class="copy-btn" href="https://fomo.family/tokens/${fomoChainSlug(ev.chain)}/${ev.mint}" target="_blank" rel="noopener" title="Open chart on fomo.family">\u{1F440}</a>
           <span style="font-size:13px;">(${who})</span>
         </div>
         <div class="divider"></div>
