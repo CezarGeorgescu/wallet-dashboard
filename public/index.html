@@ -426,6 +426,10 @@
               <div class="stat-label">Price</div>
               <div class="stat-value">${formatPrice(ev.priceUsd)}</div>
             </div>
+            <div>
+              <div class="stat-label">Market Cap</div>
+              <div class="stat-value">${formatUsd(ev.marketCapUsd)}</div>
+            </div>
           </div>
         ` : `<div style="color:var(--muted); font-size:13px; margin-top:4px;">${ev.description || ""}</div>`}
       </div>
