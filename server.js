@@ -161,15 +161,28 @@ async function sendTelegramAlert(ev) {
 
   if (ev.type === "SWAP" && ev.mint !== undefined) {
     const emoji = ev.direction === "BUY" ? "\u{1F7E2}" : "\u{1F534}";
-    const ticker = ev.symbol ? `$${escapeHtml(ev.symbol)}` : "unknown token";
-    const spentLabel = ev.direction === "SELL" ? "Received" : "Spent";
-    const spent =
-      ev.quoteValueUsd != null
-        ? `$${ev.quoteValueUsd.toFixed(2)}${ev.quoteSymbol ? ` (${ev.quoteAmount != null ? ev.quoteAmount.toFixed(4) : ""} ${escapeHtml(ev.quoteSymbol)})` : ""}`
-        : "N/A";
+    const ticker = ev.symbol ? escapeHtml(ev.symbol) : "unknown token";
+    const onSource = ev.source ? ` on ${escapeHtml(ev.source)}` : "";
+
     // <code> renders as monospace and is tap-to-copy in Telegram clients -
     // this is what makes the contract address copyable.
-    const caLine = ev.mint ? `\nCA: <code>${escapeHtml(ev.mint)}</code>` : "";
+    const caLine = ev.mint ? `<code>${escapeHtml(ev.mint)}</code> (${who})` : who;
+
+    // Both legs of the trade, formatted for the "swapped X for Y" line and
+    // the per-asset balance-change summary below it.
+    const coinAmountFmt = ev.tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    const quoteAmountFmt = ev.quoteAmount != null ? ev.quoteAmount.toLocaleString(undefined, { maximumFractionDigits: 4 }) : "?";
+    const usdFmt = ev.quoteValueUsd != null ? `$${ev.quoteValueUsd.toFixed(2)}` : "N/A";
+    const quoteSym = escapeHtml(ev.quoteSymbol || "?");
+
+    let swappedLine, balanceLines;
+    if (ev.direction === "BUY") {
+      swappedLine = `\u{1F537} ${who} swapped ${quoteAmountFmt} (${usdFmt}) ${quoteSym} for ${coinAmountFmt} (${usdFmt}) ${ticker}`;
+      balanceLines = `${ticker}: +${coinAmountFmt} (${usdFmt})\n${quoteSym}: -${quoteAmountFmt} (-${usdFmt})`;
+    } else {
+      swappedLine = `\u{1F537} ${who} swapped ${coinAmountFmt} (${usdFmt}) ${ticker} for ${quoteAmountFmt} (${usdFmt}) ${quoteSym}`;
+      balanceLines = `${quoteSym}: +${quoteAmountFmt} (${usdFmt})\n${ticker}: -${coinAmountFmt} (-${usdFmt})`;
+    }
 
     // Current holdings after this trade, computed from stored history - no
     // live price needed. % of supply uses the free on-chain supply fetched
@@ -178,15 +191,16 @@ async function sendTelegramAlert(ev) {
     const stats = computeWalletStats(ev.walletAddress).find((s) => s.mint === ev.mint);
     if (stats) {
       const pct = ev.supply ? ` (${((stats.remainingTokens / ev.supply) * 100).toFixed(2)}%)` : "";
-      holdsLine = `\nHolds: ${formatNumberCompact(stats.remainingTokens)}${pct}`;
+      holdsLine = `\u{1F36F} Holds: ${formatNumberCompact(stats.remainingTokens)}${pct}`;
     }
 
     text =
-      `${emoji} ${ev.direction} ${ticker}\n` +
-      `${who}${ev.chain ? ` \u2022 ${escapeHtml(ev.chain)}` : ""}${caLine}\n` +
-      `Amount: ${ev.tokenAmount}\n` +
-      `${spentLabel}: ${spent}${holdsLine}\n` +
-      `Price: ${formatPrice(ev.priceUsd)}`;
+      `${emoji} ${ev.direction} ${ticker}${onSource}\n` +
+      `${caLine}\n\n` +
+      `${swappedLine}\n` +
+      `${holdsLine}\n\n` +
+      `\u{1F537} ${who}:\n` +
+      `${balanceLines}`;
   } else {
     text = `\u{1F4E9} ${escapeHtml(ev.type)}\n${who}${ev.chain ? ` \u2022 ${escapeHtml(ev.chain)}` : ""}\n${escapeHtml(ev.description || "")}`;
   }
@@ -572,6 +586,7 @@ async function buildEvent(tx) {
     chain: "solana",
     type: tx.type || "UNKNOWN",
     description: tx.description || "",
+    source: tx.source || null, // e.g. "JUPITER", "PUMP_AMM" - which DEX the trade went through
   };
 
   if (tx.type !== "SWAP") return base;
